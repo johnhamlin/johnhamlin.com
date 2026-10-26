@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  # Commenting the Lighthouse URL on the pull request needs both of these.
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ASTRO_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Check
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Install gitleaks
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: gitleaks
+        # CLI over the full fetched history. gitleaks-action on pull_request
+        # scans only the pull request range, and this scan should cover history.
+        run: gitleaks detect --source . --redact --verbose --exit-code 1 --log-opts="--all"
+
+      - name: Set up Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
+        with:
+          chrome-version: stable
+          install-dependencies: true
+
+      - name: Lighthouse CI
+        id: lhci
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          set -o pipefail
+          npx lhci autorun | tee "$RUNNER_TEMP/lhci-output.txt"
+          url=$(grep -oE 'https://storage\.googleapis\.com/[^[:space:]]+' "$RUNNER_TEMP/lhci-output.txt" | head -n 1 || true)
+          url=${url%.}
+          if [ -z "$url" ]; then
+            echo "Lighthouse upload did not print a report URL."
+            exit 1
+          fi
+          scores=$(node --input-type=module -e '
+            import { readdirSync, readFileSync } from "node:fs";
+            const file = readdirSync(".lighthouseci")
+              .filter((name) => name.startsWith("lhr-") && name.endsWith(".json"))
+              .sort()[0];
+            const report = JSON.parse(readFileSync(`.lighthouseci/${file}`, "utf8"));
+            const keys = ["performance", "accessibility", "best-practices", "seo"];
+            for (const key of keys) {
+              const score = report.categories[key].score;
+              if (typeof score !== "number") {
+                throw new Error(`Missing Lighthouse score for ${key}`);
+              }
+              console.log(`${key}: ${score.toFixed(2)}`);
+            }
+          ')
+          echo "report_url=$url" >> "$GITHUB_OUTPUT"
+          {
+            echo "scores<<EOF"
+            echo "$scores"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "$scores"
+          echo "Report: $url"
+
+      - name: Link Lighthouse report
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REPORT_URL: ${{ steps.lhci.outputs.report_url }}
+          LH_SCORES: ${{ steps.lhci.outputs.scores }}
+        with:
+          script: |
+            const marker = "<!-- lighthouse-ci-report -->";
+            const body = [
+              marker,
+              `Lighthouse CI report: ${process.env.REPORT_URL}`,
+              "",
+              "Scores:",
+              "",
+              "```",
+              process.env.LH_SCORES,
+              "```",
+            ].join("\n");
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (comment) => comment.body && comment.body.includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
+
+      - name: Lighthouse step summary
+        if: always() && steps.lhci.outputs.report_url != ''
+        run: |
+          {
+            echo "### Lighthouse"
+            echo "${{ steps.lhci.outputs.report_url }}"
+            echo ""
+            echo '```'
+            echo "${{ steps.lhci.outputs.scores }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
