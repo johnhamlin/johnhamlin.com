@@ -5,46 +5,33 @@ import { minimatch } from "minimatch";
 
 const RANK = { low: 0, medium: 1, high: 2 };
 const FLOOR =
-  "**/AGENTS.md **/CLAUDE.md **/REVIEW.md .cursor/** .claude/** .github/**".split(
+  "**/AGENTS.md **/CLAUDE.md **/REVIEW.md **/GEMINI.md **/.mcp.json **/.cursorrules **/.cursor/** **/.claude/** .github/**".split(
     " ",
   );
-const BOX =
-  /^[ \t]*(?:[-*+]|\d+\.)\s+\[([xX])\]\s+(low|medium|high)(?![\w-])/gm;
+const TICK = /^[ \t]*(?:[-*+]|\d+\.)\s+\[[xX]\]\s+(\S+)/gm;
+const TIER = /^(low|medium|high)(?![\w-])/;
 const MATCH = { dot: true, nocase: true, nonegate: true, nocomment: true };
 
 function git(args) {
   return execFileSync("git", args, { encoding: "utf8" });
 }
 
-function unquoteGit(field) {
-  if (field[0] !== '"') return field;
-  if (field.at(-1) !== '"') throw new Error("bad diff field");
-  const bytes = [];
-  const pattern = /\\([0-7]{3}|.)|[^\\]/g;
-  field.slice(1, -1).replace(pattern, (all, esc) => {
-    if (esc == null) bytes.push(all.charCodeAt(0));
-    else if (esc === "n" || esc === "t") bytes.push(esc === "n" ? 10 : 9);
-    else if (esc === "\\" || esc === '"') bytes.push(esc.charCodeAt(0));
-    else if (/^[0-7]{3}$/.test(esc)) bytes.push(Number.parseInt(esc, 8));
-    else throw new Error("bad diff field");
-    return "";
-  });
-  return Buffer.from(bytes).toString();
-}
-
 export function pathsFromNameStatus(text) {
+  const fields = String(text).split("\0");
+  if (fields.at(-1) === "") fields.pop();
   const paths = [];
-  for (const line of String(text).split("\n")) {
-    if (!line) continue;
-    const fields = line.split("\t").map(unquoteGit);
-    const status = fields[0] ?? "";
+  let index = 0;
+  while (index < fields.length) {
+    const status = fields[index] ?? "";
     const renamed = status[0] === "R" || status[0] === "C";
-    const names = fields.slice(1, renamed ? 3 : 2);
+    const count = renamed ? 2 : 1;
+    const names = fields.slice(index + 1, index + 1 + count);
     const valid = /^[ACDMRTUXB]\d*$/.test(status);
-    if (!valid || names.length !== (renamed ? 2 : 1) || names.some((n) => !n)) {
+    if (!valid || names.length !== count || names.some((name) => !name)) {
       throw new Error("unreadable diff line");
     }
     paths.push(...names);
+    index += count + 1;
   }
   return paths;
 }
@@ -95,9 +82,10 @@ export function claimedTier(body) {
   const rest = text.slice(heading.index + heading[0].length);
   const next = rest.search(/^## /m);
   const section = next === -1 ? rest : rest.slice(0, next);
-  const checked = [...section.matchAll(BOX)].map((match) => match[2]);
-  if (checked.length !== 1) throw new Error("exactly one risk tier required");
-  return checked[0];
+  const checked = [...section.matchAll(TICK)].map((match) => match[1]);
+  const tier = checked.length === 1 ? TIER.exec(checked[0]) : null;
+  if (!tier) throw new Error("exactly one risk tier required");
+  return tier[1];
 }
 
 export function checkClaim(body, paths, tiersText) {
@@ -120,7 +108,7 @@ function changedPaths(base, head) {
   if (shallow === "true") git(["fetch", "--no-tags", "--unshallow", "origin"]);
   git(["fetch", "--no-tags", "origin", from, to]);
   const spec = `${from}...${to}`;
-  return pathsFromNameStatus(git(["diff", "--name-status", "-M", spec]));
+  return pathsFromNameStatus(git(["diff", "-z", "--name-status", "-M", spec]));
 }
 
 function main() {

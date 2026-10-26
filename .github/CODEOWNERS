@@ -4,7 +4,12 @@
 **/CLAUDE.md @johnhamlin
 **/REVIEW.md @johnhamlin
 /.cursor/** @johnhamlin
+**/.cursor/** @johnhamlin
 /.claude/** @johnhamlin
+**/.claude/** @johnhamlin
+**/.mcp.json @johnhamlin
+**/.cursorrules @johnhamlin
+**/GEMINI.md @johnhamlin
 /.github/** @johnhamlin
 /astro.config.mjs @johnhamlin
 /lighthouserc.json @johnhamlin
@@ -17,6 +22,8 @@
 /.env.* @johnhamlin
 **/.env @johnhamlin
 **/.env.* @johnhamlin
+**/.dev.vars @johnhamlin
+**/.dev.vars.* @johnhamlin
 /wrangler.toml @johnhamlin
 /wrangler.json @johnhamlin
 /wrangler.jsonc @johnhamlin

@@ -2,10 +2,14 @@ name: Risk tier
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
+concurrency:
+  group: risk-tier-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 permissions: {}
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions: {}
     steps:
       - run: export GITHUB_TOKEN= GIT_TERMINAL_PROMPT=0 PR_NUMBER="${{ github.event.pull_request.number }}" && git init . && git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git" && git fetch --depth 1 origin "pull/${PR_NUMBER}/head" && git checkout --detach FETCH_HEAD
@@ -15,11 +19,13 @@ jobs:
       - run: GITHUB_TOKEN= npm ci && GITHUB_TOKEN= npm test
   tier:
     runs-on: ubuntu-slim
+    timeout-minutes: 5
     permissions: { contents: read }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - run: |
           if [ -f scripts/risk-tier.mjs ] && [ -f risk-tiers ]; then npm ci && node scripts/risk-tier.mjs; exit; fi

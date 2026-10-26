@@ -1,16 +1,24 @@
 # tier, then the glob. The glob is the rest of the line and may contain spaces.
 # Do not put a comment after the glob.
-# A path that matches nothing is medium.
-# When a path matches more than one glob, the highest tier wins.
+# Each changed path gets its own tier. A path that matches nothing is medium.
+# The pull request tier is the highest tier among those paths.
+# When one path matches more than one glob, the highest tier wins.
 # low < medium < high
-# These paths are also hardcoded as high in scripts/risk-tier.mjs.
-# The path is lowercased once before rules run, so every glob is case-insensitive.
+# Matching is case-insensitive. Paths are not lowercased first.
+# scripts/risk-tier.mjs also forces these to high: **/AGENTS.md **/CLAUDE.md
+# **/REVIEW.md **/GEMINI.md **/.mcp.json **/.cursorrules **/.cursor/**
+# **/.claude/** .github/**
 
 high **/AGENTS.md
 high **/CLAUDE.md
 high **/REVIEW.md
+high **/GEMINI.md
 high .cursor/**
+high **/.cursor/**
 high .claude/**
+high **/.claude/**
+high **/.mcp.json
+high **/.cursorrules
 high .github/**
 high astro.config.mjs
 high lighthouserc.json
@@ -23,6 +31,8 @@ high .env
 high .env.*
 high **/.env
 high **/.env.*
+high **/.dev.vars
+high **/.dev.vars.*
 high wrangler.toml
 high wrangler.json
 high wrangler.jsonc
@@ -36,6 +46,7 @@ medium src/pages/**
 medium src/styles/**
 medium src/components/**
 medium src/layouts/**
+medium functions/**
 
 low docs/**
 low README.md
