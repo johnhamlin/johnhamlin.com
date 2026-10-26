@@ -12,7 +12,7 @@
 
 - [ ] low — posts, copy, and docs
 - [ ] medium — components, layouts, styles, and routing
-- [ ] high — astro.config, CI and Cloudflare deploy, redirects and headers, dependency upgrades, drafts or env
+- [ ] high — astro.config, CI and Cloudflare deploy, redirects and headers, dependency upgrades, drafts or env, agent instruction files (`REVIEW.md`, `AGENTS.md`, `CLAUDE.md`, `.cursor/**`, this template)
 
 Which high-risk trigger applies? (for example CI/deploy or secrets)
 

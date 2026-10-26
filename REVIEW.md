@@ -33,7 +33,7 @@ What failure looks like here: a post leaks a draft or the unredacted résumé, c
 
 The risk tier is set by the change, not the author. Use the highest tier the diff touches. Scale that tier by blast radius and by how easy a rollback is. A revert of one content file is easier than a config change that affects every request.
 
-Any file under `.github/workflows/` is always high.
+Any file under `.github/workflows/` is always high. Agent instruction files are always high.
 
 ### High
 
@@ -42,6 +42,7 @@ Any file under `.github/workflows/` is always high.
 - Cloudflare deploy config, redirects, and headers. None of those files are in the repo. Adding one is high.
 - Dependency upgrades in `package.json`, and the `package-lock.json` entries that belong to that upgrade
 - Anything that could leak drafts or env: a committed `.env` or `.env.*` file, a token, an unpublished post, or a résumé that is not redacted
+- Agent instruction files: `REVIEW.md`, `AGENTS.md`, `CLAUDE.md`, `.cursor/**`, and `.github/pull_request_template.md`. They steer every future agent, so a wrong line causes real damage.
 
 ### Medium
 
@@ -51,7 +52,7 @@ Any file under `.github/workflows/` is always high.
 
 ### Low
 
-- `docs/`, `README.md`, `AGENTS.md`, and `CLAUDE.md`
+- `docs/` and `README.md`
 - Posts and other copy. There is no posts directory yet. A résumé file is low only when it is redacted.
 
 ## Repo-specific gotchas
