@@ -8,7 +8,7 @@
 
 ## Risk tier
 
-<!-- Check one. The risk:* label is computed from the changed paths and is the source of truth. A missing check, or a checked tier lower than that label, fails CI. Definitions are in REVIEW.md. -->
+<!-- Check one. The check computes the tier from the changed paths and risk-tiers. A missing tier, a tier it cannot parse, or a tier lower than the computed one fails the job. Definitions are in REVIEW.md. -->
 
 - [ ] low — posts, copy, and docs
 - [ ] medium — components, layouts, styles, routing, and any unmatched path

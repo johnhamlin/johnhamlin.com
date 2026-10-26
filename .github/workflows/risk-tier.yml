@@ -1,12 +1,8 @@
 name: Risk tier
 
-# pull_request, not pull_request_target.
-# The label job checks out only the base commit. Pull request files are never
-# on disk there, including no head checkout and no merge commit. Changed paths
-# come from the GitHub API. Node is the ubuntu-slim image's preinstalled
-# binary. That job does not run setup-node, npm, or yarn. Its concurrency
-# group does not cancel an in-progress label update. Tests are a separate job
-# with no token and no base checkout.
+# pull_request, not pull_request_target. The check job checks out only the
+# base commit, so pull request files are never on disk. It does not run
+# setup-node, npm, or yarn, and it does not call the label API.
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
@@ -19,9 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
-    concurrency:
-      group: risk-tier-test-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
     steps:
       - name: Checkout pull request
         env:
@@ -48,12 +41,9 @@ jobs:
     name: Risk tier
     runs-on: ubuntu-slim
     timeout-minutes: 5
-    concurrency:
-      group: risk-tier-label-${{ github.event.pull_request.number }}
-      cancel-in-progress: false
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
     steps:
       - name: Checkout base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,273 +51,29 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      - name: Note whether the base has the check
-        id: base-check
+      - name: Check risk tier
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -f scripts/risk-tier.mjs ] && [ -f risk-tiers ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
+            node scripts/risk-tier.mjs
+            exit
           fi
-
-      - name: Set risk label from the base script
-        if: steps.base-check.outputs.ready == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/risk-tier.mjs
-
-      - name: Fail closed when the base lacks the check
-        if: steps.base-check.outputs.ready != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BOOTSTRAP_SOURCE: |
-            import fs from "node:fs";
-
-            function parseChecked(body) {
-              const text = String(body ?? "");
-              const heading = text.match(/^## Risk tier\s*$/m);
-              let section = "";
-              if (heading) {
-                const start = heading.index + heading[0].length;
-                const rest = text.slice(start);
-                const next = rest.search(/^## /m);
-                section = next === -1 ? rest : rest.slice(0, next);
-              }
-              const checked = [];
-              for (const line of section.split(/\r?\n/)) {
-                const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?![\w-])/);
-                if (match && (match[1] === "x" || match[1] === "X")) checked.push(match[2]);
-              }
-              return checked;
-            }
-            // end parseChecked
-
-            const token = process.env.GITHUB_TOKEN;
-            const repository = process.env.GITHUB_REPOSITORY;
-            if (!token) throw new Error("GITHUB_TOKEN is not set");
-            if (!repository || !repository.includes("/")) throw new Error("GITHUB_REPOSITORY must be owner/name");
-            const [owner, repo] = repository.split("/");
-            const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
-            const number = event.pull_request.number;
-            const body = String(event.pull_request.body ?? "");
-            const checked = parseChecked(body);
-            const missing = [];
-            if (!fs.existsSync("scripts/risk-tier.mjs")) missing.push("scripts/risk-tier.mjs");
-            if (!fs.existsSync("risk-tiers")) missing.push("risk-tiers");
-            const reason = missing.length
-              ? "base has no " + missing.join(" and ")
-              : "base has no scripts/risk-tier.mjs or risk-tiers";
-            console.log("bootstrap: " + reason);
-            console.log("computed high");
-            console.log("claimed " + (checked.length === 1 ? checked[0] : "none"));
-            let failure = null;
-            if (checked.length === 0) failure = "No risk tier is checked in the pull request body.";
-            else if (checked.length > 1) failure = "The pull request body checks more than one risk tier.";
-            else if (checked[0] !== "high") failure = "Claimed risk tier " + checked[0] + " is lower than computed tier high.";
-            if (fs.existsSync("risk-tiers")) {
-              const tierLines = fs.readFileSync("risk-tiers", "utf8").split(/\r?\n/);
-              for (let index = 0; index < tierLines.length; index += 1) {
-                const line = tierLines[index].trim();
-                if (!line || line.startsWith("#")) continue;
-                if (!/^(low|medium|high)\s+\S/.test(line)) {
-                  console.log("risk-tiers is invalid. The tier fails closed to high. risk-tiers:" + (index + 1) + ": expected \"tier glob\"");
-                  break;
-                }
-              }
-            }
-
-            const headers = {
-              Accept: "application/vnd.github+json",
-              Authorization: "Bearer " + token,
-              "Content-Type": "application/json",
-              "User-Agent": "johnhamlin-com-risk-tier",
-              "X-GitHub-Api-Version": "2022-11-28",
-            };
-            async function github(method, apiPath, payload) {
-              const response = await fetch("https://api.github.com" + apiPath, {
-                method,
-                headers,
-                body: payload ? JSON.stringify(payload) : undefined,
-              });
-              const text = await response.text();
-              let parsed = null;
-              if (text) {
-                try {
-                  parsed = JSON.parse(text);
-                } catch {
-                  parsed = text;
-                }
-              }
-              if (!response.ok) {
-                const detail = parsed && parsed.message ? parsed.message : text;
-                const error = new Error(method + " " + apiPath + " failed (" + response.status + "): " + detail);
-                error.status = response.status;
-                throw error;
-              }
-              return parsed;
-            }
-            const FILES_API_CAP = 3000;
-            function unsafePathReason(filePaths) {
-              for (const filePath of filePaths) {
-                if (filePath.includes("\\")) return "Changed path " + JSON.stringify(filePath) + " contains \\. The tier fails closed to high.";
-                if (filePath.split("/").includes("..")) return "Changed path " + JSON.stringify(filePath) + " contains a .. segment. The tier fails closed to high.";
-              }
-              return null;
-            }
-            function changedFilesFailure(returnedCount, changedFiles, capHit) {
-              if (capHit) return "The files API page cap of " + FILES_API_CAP + " was hit (" + returnedCount + " files returned). The tier fails closed to high.";
-              if (!Number.isInteger(changedFiles) || changedFiles < 0) return "pull_request.changed_files is missing. The tier fails closed to high.";
-              if (!Number.isInteger(returnedCount) || returnedCount < changedFiles) {
-                const count = Number.isInteger(returnedCount) ? returnedCount : 0;
-                return "The files API returned " + count + " files, fewer than pull_request.changed_files (" + changedFiles + "). The list stops at " + FILES_API_CAP + ". The tier fails closed to high.";
-              }
-              return null;
-            }
-            try {
-              const files = [];
-              let capHit = false;
-              for (let page = 1; ; page += 1) {
-                const batch = await github("GET", "/repos/" + owner + "/" + repo + "/pulls/" + number + "/files?per_page=100&page=" + page);
-                if (!Array.isArray(batch) || batch.length === 0) break;
-                const room = FILES_API_CAP - files.length;
-                if (batch.length > room) {
-                  files.push(...batch.slice(0, room));
-                  capHit = true;
-                  break;
-                }
-                files.push(...batch);
-                if (files.length >= FILES_API_CAP) {
-                  capHit = true;
-                  break;
-                }
-                if (batch.length < 100) break;
-              }
-              const paths = [];
-              for (const file of files) {
-                if (file.filename) paths.push(file.filename);
-                if (file.previous_filename) paths.push(file.previous_filename);
-              }
-              const listFailure = changedFilesFailure(files.length, event.pull_request.changed_files, capHit);
-              const pathFailure = unsafePathReason(paths);
-              if (listFailure) console.log(listFailure);
-              if (pathFailure) console.log(pathFailure);
-            } catch (error) {
-              console.warn("warning: could not read the changed-file list. The tier stays high. " + error.message);
-            }
-            function outcomeAfterLabelWrite(labels, computedTier, state) {
-              const writeSucceeded = Boolean(state && state.writeSucceeded);
-              const readError = state && state.readError ? state.readError : null;
-              if (writeSucceeded && readError) return "Could not re-read labels after a successful label write.";
-              const names = Array.isArray(labels) ? labels : [];
-              const unknown = names.filter((name) => typeof name === "string" && name.indexOf("risk:") === 0 && name !== "risk:low" && name !== "risk:medium" && name !== "risk:high");
-              if (unknown.length > 0) return "Risk label " + unknown[0] + " is not a known risk tier.";
-              const riskNames = names.filter((name) => name === "risk:low" || name === "risk:medium" || name === "risk:high");
-              const rank = { low: 0, medium: 1, high: 2 };
-              if (riskNames.length > 1) return "Label update left more than one risk:* label.";
-              if (riskNames.length === 1) {
-                const tier = riskNames[0].slice("risk:".length);
-                if (rank[tier] != null && rank[computedTier] != null && rank[tier] > rank[computedTier]) {
-                  return "Risk label " + riskNames[0] + " is higher than computed tier " + computedTier + ".";
-                }
-                if (rank[tier] == null || rank[computedTier] == null || rank[tier] !== rank[computedTier]) {
-                  return "Risk label " + riskNames[0] + " is lower than computed tier high.";
-                }
-                return null;
-              }
-              if (writeSucceeded) return "A label write succeeded but the pull request has no risk:* label.";
-              if (state && state.writeDenied) return null;
-              if (readError) return null;
-              return "The pull request has no risk:* label.";
-            }
-            // end outcomeAfterLabelWrite
-            async function applyRiskLabel(github, owner, repo, number) {
-              let names = [];
-              let labelError = null;
-              let writeSucceeded = false;
-              let writeDenied = false;
-              let mutating = false;
-              try {
-                const current = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
-                names = Array.isArray(current) ? current.map((label) => label.name) : [];
-                const spec = { name: "risk:high", color: "b60205", description: "Computed path risk tier is high." };
-                const encoded = encodeURIComponent(spec.name);
-                try {
-                  await github("GET", "/repos/" + owner + "/" + repo + "/labels/" + encoded);
-                } catch (error) {
-                  if (error.status !== 404) throw error;
-                  mutating = true;
-                  try {
-                    await github("POST", "/repos/" + owner + "/" + repo + "/labels", spec);
-                    writeSucceeded = true;
-                  } catch (error) {
-                    if (error.status !== 422) throw error;
-                  }
-                  mutating = false;
-                }
-                if (!names.includes("risk:high")) {
-                  mutating = true;
-                  await github("POST", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels", { labels: ["risk:high"] });
-                  writeSucceeded = true;
-                  names.push("risk:high");
-                  mutating = false;
-                }
-                for (const name of ["risk:low", "risk:medium"]) {
-                  if (!names.includes(name)) continue;
-                  mutating = true;
-                  try {
-                    await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
-                    writeSucceeded = true;
-                  } catch (error) {
-                    if (error.status !== 404) throw error;
-                  }
-                  mutating = false;
-                  names = names.filter((item) => item !== name);
-                }
-              } catch (error) {
-                labelError = error;
-                for (const name of ["risk:low", "risk:medium"]) {
-                  if (!names.includes(name)) continue;
-                  try {
-                    await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
-                    writeSucceeded = true;
-                    names = names.filter((item) => item !== name);
-                  } catch (cleanupError) {
-                    if (cleanupError.status === 404) names = names.filter((item) => item !== name);
-                  }
-                }
-                if (error.status !== 403) throw error;
-                writeDenied = mutating && !writeSucceeded;
-                console.warn("warning: label write was denied (403). Continuing with the body check. " + error.message);
-              }
-              let readError = null;
-              try {
-                const again = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
-                names = Array.isArray(again) ? again.map((label) => label.name) : [];
-              } catch (error) {
-                readError = error;
-                if (!labelError) labelError = error;
-                if (error.status !== 403) {
-                  if (writeSucceeded) console.error("Could not re-read labels after a successful label write.");
-                  throw error;
-                }
-                if (!writeSucceeded) console.warn("warning: could not re-read labels after the label write. " + error.message);
-              }
-              const labelProblem = outcomeAfterLabelWrite(names, "high", { writeSucceeded: writeSucceeded, readError: readError, writeDenied: writeDenied });
-              return { names: names, labelError: labelError, writeSucceeded: writeSucceeded, readError: readError, labelProblem: labelProblem };
-            }
-            // end applyRiskLabel
-            const applied = await applyRiskLabel(github, owner, repo, number);
-            if (applied.labelProblem) {
-              console.error(applied.labelProblem);
-              process.exitCode = 1;
-            } else if (!applied.readError && applied.names.includes("risk:high")) {
-              console.log("risk label: risk:high");
-            }
-            if (process.env.GITHUB_STEP_SUMMARY) {
-              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "Risk label: `risk:high`\n\n" + reason + ". The tier fails closed to high.\n");
-            }
-            if (failure) {
-              console.error(failure);
-              process.exitCode = 1;
-            }
-        run: node --input-type=module -e "$BOOTSTRAP_SOURCE"
+          node --input-type=module -e 'import fs from "node:fs";
+          const body = String(JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")).pull_request.body ?? "");
+          const heading = body.match(/^## Risk tier\s*$/m);
+          const rest = heading ? body.slice(heading.index + heading[0].length) : "";
+          const end = rest.search(/^## /m);
+          const section = heading ? (end === -1 ? rest : rest.slice(0, end)) : "";
+          const checked = [];
+          for (const line of section.split(/\r?\n/)) {
+            const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?![\w-])/);
+            if (match && (match[1] === "x" || match[1] === "X")) checked.push(match[2]);
+          }
+          console.log("base has no scripts/risk-tier.mjs or risk-tiers");
+          console.log("computed high");
+          if (checked.length !== 1 || checked[0] !== "high") {
+            console.error("Claimed risk tier is missing or lower than computed tier high.");
+            process.exit(1);
+          }
+          console.log("claimed high");'
