@@ -64,7 +64,8 @@ Use `.github/pull_request_template.md`. Every pull request has these sections:
 
 - **Ticket.** The id and one line on what the change does.
 - **Proof.** A command and its real output. Paste the output.
-- **Risk tier.** Check one box in the template.
+- **Risk tier.** Check one box in the template. The tier follows the change. Any file under `.github/workflows/` is high.
+- **Review.** Rounds to pass, and the count of findings tagged Important, Nit, and Pre-existing.
 - **How to revert.** How to undo the change safely.
 
 Risk tiers, the review checklist, and the cross-model loop are in `REVIEW.md`.

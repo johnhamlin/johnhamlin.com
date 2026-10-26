@@ -16,6 +16,18 @@
 
 Which high-risk trigger applies? (for example CI/deploy or secrets)
 
+## Review
+
+<!-- Rounds to pass is 1, 2, or 3. Counts are findings per tag. See REVIEW.md. -->
+
+Rounds to pass:
+
+Findings:
+
+- Important:
+- Nit:
+- Pre-existing:
+
 ## How to revert
 
 <!-- How to undo this change safely. -->
