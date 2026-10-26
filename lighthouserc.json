@@ -4,7 +4,7 @@
       "staticDistDir": "./dist",
       "numberOfRuns": 1,
       "settings": {
-        "chromeFlags": ["--no-sandbox", "--disable-dev-shm-usage"]
+        "chromeFlags": "--no-sandbox --disable-dev-shm-usage"
       }
     },
     "assert": {
