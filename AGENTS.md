@@ -67,7 +67,7 @@ Use `.github/pull_request_template.md`. Every pull request has these sections:
 - **Risk tier.** Check one box in the template.
 - **How to revert.** How to undo the change safely.
 
-`REVIEW.md` is a placeholder. The review checklist and the risk-tier definitions will be added from a sourced template.
+Risk tiers, the review checklist, and the cross-model loop are in `REVIEW.md`.
 
 ## pstack
 

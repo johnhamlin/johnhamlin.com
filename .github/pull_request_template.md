@@ -10,9 +10,9 @@
 
 <!-- Check one. Definitions and what each tier requires are in REVIEW.md. -->
 
-- [ ] low — docs or copy only
-- [ ] medium — ordinary product work
-- [ ] high — prices or calculator, schema or migrations, auth, CI or deploy, secrets, user data
+- [ ] low — posts, copy, and docs
+- [ ] medium — components, layouts, styles, and routing
+- [ ] high — astro.config, CI and Cloudflare deploy, redirects and headers, dependency upgrades, drafts or env
 
 Which high-risk trigger applies? (for example CI/deploy or secrets)
 
