@@ -349,34 +349,41 @@ function apiHeaders(token) {
   };
 }
 
-async function github(token, method, apiPath, body) {
-  const response = await fetch(`${API}${apiPath}`, {
-    method,
-    headers: {
-      ...apiHeaders(token),
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await response.text();
-  let parsed = null;
-  if (text) {
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = text;
+async function github(token, method, apiPath, body, gate) {
+  const labelWrite = Boolean(gate) && (method === "POST" || method === "DELETE" || method === "PUT");
+  if (labelWrite) gate.mutating = true;
+  try {
+    const response = await fetch(`${API}${apiPath}`, {
+      method,
+      headers: {
+        ...apiHeaders(token),
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const text = await response.text();
+    let parsed = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text;
+      }
     }
+    if (!response.ok) {
+      const detail = parsed && typeof parsed === "object" && parsed.message ? parsed.message : text;
+      const error = new Error(`${method} ${apiPath} failed (${response.status}): ${detail}`);
+      error.status = response.status;
+      if (gate && gate.mutating && error.status === 403) gate.writeDenied = true;
+      throw error;
+    }
+    return parsed;
+  } finally {
+    if (labelWrite) gate.mutating = false;
   }
-  if (!response.ok) {
-    const detail = parsed && typeof parsed === "object" && parsed.message ? parsed.message : text;
-    const error = new Error(`${method} ${apiPath} failed (${response.status}): ${detail}`);
-    error.status = response.status;
-    throw error;
-  }
-  return parsed;
 }
 
-async function ensureLabel(token, owner, repo, spec) {
+async function ensureLabel(token, owner, repo, spec, gate) {
   const encoded = encodeURIComponent(spec.name);
   try {
     await github(token, "GET", `/repos/${owner}/${repo}/labels/${encoded}`);
@@ -385,7 +392,7 @@ async function ensureLabel(token, owner, repo, spec) {
     if (error.status !== 404) throw error;
   }
   try {
-    await github(token, "POST", `/repos/${owner}/${repo}/labels`, spec);
+    await github(token, "POST", `/repos/${owner}/${repo}/labels`, spec, gate);
     return true;
   } catch (error) {
     if (error.status !== 422) throw error;
@@ -434,7 +441,8 @@ async function listIssueLabels(token, owner, repo, number) {
   return names;
 }
 
-async function syncLabel(token, owner, repo, number, tier) {
+export async function syncLabel(token, owner, repo, number, tier) {
+  const gate = { mutating: false, writeDenied: false };
   let current = [];
   let settledError = null;
   try {
@@ -447,7 +455,7 @@ async function syncLabel(token, owner, repo, number, tier) {
     if (action.op === "remove") {
       const encoded = encodeURIComponent(action.name);
       try {
-        await github(token, "DELETE", `/repos/${owner}/${repo}/issues/${number}/labels/${encoded}`);
+        await github(token, "DELETE", `/repos/${owner}/${repo}/issues/${number}/labels/${encoded}`, undefined, gate);
       } catch (error) {
         if (error.status !== 404) throw error;
         return false;
@@ -457,7 +465,7 @@ async function syncLabel(token, owner, repo, number, tier) {
     if (action.op === "add") {
       await github(token, "POST", `/repos/${owner}/${repo}/issues/${number}/labels`, {
         labels: [action.name],
-      });
+      }, gate);
       return;
     }
     throw new Error(`Unknown label op: ${action.op}`);
@@ -473,7 +481,7 @@ async function syncLabel(token, owner, repo, number, tier) {
   if (!settledError) {
     try {
       for (const spec of LABEL_SPECS) {
-        if (await ensureLabel(token, owner, repo, spec)) writeSucceeded = true;
+        if (await ensureLabel(token, owner, repo, spec, gate)) writeSucceeded = true;
       }
       settled = await settleLabelPlan(current, plan, write);
       if (settled.writeSucceeded) writeSucceeded = true;
@@ -482,7 +490,7 @@ async function syncLabel(token, owner, repo, number, tier) {
     }
   }
   settled.writeSucceeded = writeSucceeded;
-  const writeDenied = Boolean(!settledError && settled.error && settled.error.status === 403 && !writeSucceeded);
+  const writeDenied = Boolean(gate.writeDenied && !writeSucceeded);
   let observed = settled.labels;
   let readError = null;
   try {
@@ -508,7 +516,7 @@ function readEvent() {
   return event;
 }
 
-async function main() {
+export async function main() {
   const token = process.env.GITHUB_TOKEN;
   const repository = process.env.GITHUB_REPOSITORY;
   if (!token) throw new Error("GITHUB_TOKEN is not set");
@@ -569,13 +577,17 @@ async function main() {
   if (gate.warning) console.warn(gate.warning);
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
-    const label = plan ? plan.label : labelForTier(computed);
     const note = [gate.warning, tiersFailure, listFailure, unsafeFailure].filter(Boolean).join("\n\n");
-    const extra = note ? `\n\n${note}` : "";
-    fs.appendFileSync(
-      summaryPath,
-      `Risk label: \`${label}\`\n\nComputed from the changed paths. The pull request body does not set this tier.${extra}\n`,
-    );
+    if (labelProblem) {
+      if (note) fs.appendFileSync(summaryPath, `${note}\n`);
+    } else {
+      const label = plan ? plan.label : labelForTier(computed);
+      const extra = note ? `\n\n${note}` : "";
+      fs.appendFileSync(
+        summaryPath,
+        `Risk label: \`${label}\`\n\nComputed from the changed paths. The pull request body does not set this tier.${extra}\n`,
+      );
+    }
   }
   if (gate.exitCode !== 0) {
     if (failure) console.error(failure);

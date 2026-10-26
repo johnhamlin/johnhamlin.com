@@ -20,8 +20,10 @@ import {
   parseClaimedTier,
   planLabelUpdates,
   repoRoot,
+  main,
   riskLabelProblem,
   settleLabelPlan,
+  syncLabel,
   tierForLogLine,
   unsafePathReason,
 } from "./risk-tier.mjs";
@@ -82,6 +84,148 @@ function bootstrapLabelApi() {
   const end = source.indexOf("// end applyRiskLabel");
   assert.ok(start !== -1 && end > start);
   return new Function(`${source.slice(start, end)}\nreturn { outcomeAfterLabelWrite, applyRiskLabel };`)();
+}
+
+function githubResult(status, body) {
+  const text = body == null ? "" : JSON.stringify(body);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => text,
+  };
+}
+
+async function withGithub(route, run) {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method || "GET";
+    const apiPath = String(url).replace("https://api.github.com", "");
+    calls.push({ method, apiPath });
+    const result = route(method, apiPath);
+    return githubResult(result.status, result.body);
+  };
+  try {
+    return await run(calls);
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+
+function pullsAndLabels(method, apiPath, issueLabels) {
+  if (method === "GET" && apiPath.includes("/pulls/")) {
+    return { status: 200, body: [{ filename: "REVIEW.md" }] };
+  }
+  if (method === "GET" && apiPath.includes("/issues/") && apiPath.includes("/labels")) {
+    return { status: 200, body: issueLabels() };
+  }
+  return null;
+}
+
+function labelGetDeniedRoute(method, apiPath) {
+  const read = pullsAndLabels(method, apiPath, () => []);
+  if (read) return read;
+  if (method === "GET" && apiPath.includes("/labels/")) {
+    return { status: 403, body: { message: "Resource not accessible by integration" } };
+  }
+  return { status: 500, body: { message: `unexpected ${method} ${apiPath}` } };
+}
+
+function labelPostDeniedRoute(method, apiPath) {
+  const read = pullsAndLabels(method, apiPath, () => []);
+  if (read) return read;
+  if (method === "GET" && apiPath.includes("/labels/")) {
+    return { status: 200, body: { name: "risk:high" } };
+  }
+  if (method === "POST" && apiPath.includes("/issues/") && apiPath.includes("/labels")) {
+    return { status: 403, body: { message: "Resource not accessible by integration" } };
+  }
+  return { status: 500, body: { message: `unexpected ${method} ${apiPath}` } };
+}
+
+function droppedLabelRoute() {
+  let issueReads = 0;
+  return (method, apiPath) => {
+    const read = pullsAndLabels(method, apiPath, () => {
+      issueReads += 1;
+      return issueReads === 1 ? [{ name: "risk:high" }] : [];
+    });
+    if (read) return read;
+    if (method === "GET" && apiPath.includes("/labels/")) {
+      return { status: 200, body: { name: "risk:high" } };
+    }
+    return { status: 500, body: { message: `unexpected ${method} ${apiPath}` } };
+  };
+}
+
+function assertNoLabelWrite(calls) {
+  assert.equal(
+    calls.some((call) => call.method === "POST" || call.method === "DELETE" || call.method === "PUT"),
+    false,
+  );
+}
+
+async function runMain(route) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "risk-tier-main-"));
+  const eventPath = path.join(dir, "event.json");
+  const summaryPath = path.join(dir, "summary.md");
+  fs.writeFileSync(
+    eventPath,
+    JSON.stringify({
+      pull_request: {
+        number: 7,
+        changed_files: 1,
+        body: riskBody("- [x] high"),
+      },
+    }),
+  );
+  const previous = {
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    GITHUB_REPOSITORY: process.env.GITHUB_REPOSITORY,
+    GITHUB_EVENT_PATH: process.env.GITHUB_EVENT_PATH,
+    GITHUB_STEP_SUMMARY: process.env.GITHUB_STEP_SUMMARY,
+    exitCode: process.exitCode,
+  };
+  const errors = [];
+  const warnings = [];
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  const originalLog = console.log;
+  console.error = (...args) => {
+    errors.push(args.join(" "));
+  };
+  console.warn = (...args) => {
+    warnings.push(args.join(" "));
+  };
+  console.log = () => {};
+  process.env.GITHUB_TOKEN = "token";
+  process.env.GITHUB_REPOSITORY = "o/r";
+  process.env.GITHUB_EVENT_PATH = eventPath;
+  process.env.GITHUB_STEP_SUMMARY = summaryPath;
+  process.exitCode = 0;
+  try {
+    const calls = await withGithub(route, async (seen) => {
+      await main();
+      return seen.slice();
+    });
+    return {
+      exitCode: process.exitCode,
+      summary: fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, "utf8") : "",
+      errors,
+      warnings,
+      calls,
+    };
+  } finally {
+    console.error = originalError;
+    console.warn = originalWarn;
+    console.log = originalLog;
+    process.exitCode = previous.exitCode === undefined ? 0 : previous.exitCode;
+    for (const key of ["GITHUB_TOKEN", "GITHUB_REPOSITORY", "GITHUB_EVENT_PATH", "GITHUB_STEP_SUMMARY"]) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 test("a REVIEW.md-only change is high", () => {
@@ -410,8 +554,19 @@ test("a 403 midway through a label update never passes with two risk labels", as
   });
   assert.equal(fork.conflict, false);
   assert.deepEqual(fork.risk, []);
-  assert.equal(riskLabelProblem(fork.risk, "high", { writeSucceeded: false, writeDenied: true }), null);
-  assert.equal(finishGate({ labelError: fork.error, failure: null, labelProblem: null }).exitCode, 0);
+  await withGithub(labelPostDeniedRoute, async (calls) => {
+    await assert.rejects(syncLabel("token", "o", "r", 7, "high"), (error) => {
+      assert.equal(error.status, 403);
+      assert.equal(error.labelProblem, null);
+      return true;
+    });
+    assert.ok(calls.some((call) => call.method === "POST" && call.apiPath.includes("/issues/")));
+    assert.equal(calls.some((call) => call.method === "DELETE" || call.method === "PUT"), false);
+  });
+  const warnedMain = await runMain(labelPostDeniedRoute);
+  assert.equal(warnedMain.exitCode, 0);
+  assert.match(warnedMain.warnings.join("\n"), /403/);
+  assert.match(warnedMain.warnings.join("\n"), /Continuing with the body check/);
 });
 
 test("a refused add that leaves risk:low fails when the tier is higher", async () => {
@@ -458,17 +613,47 @@ test("zero labels after a successful write fails", async () => {
   assert.equal(failed.exitCode, 1);
   assert.match(failed.warning, /403/);
   assert.doesNotMatch(failed.warning, /Continuing with the body check/);
-  const warned = finishGate({
-    labelError: denied,
-    failure: null,
-    labelProblem: riskLabelProblem([], "high", { writeSucceeded: false, writeDenied: true }),
+  await withGithub(labelPostDeniedRoute, async (calls) => {
+    await assert.rejects(syncLabel("token", "o", "r", 7, "high"), (error) => {
+      assert.equal(error.status, 403);
+      assert.equal(error.labelProblem, null);
+      return true;
+    });
+    assert.ok(calls.some((call) => call.method === "POST" && call.apiPath.includes("/issues/")));
   });
-  assert.equal(warned.exitCode, 0);
+  const warnedMain = await runMain(labelPostDeniedRoute);
+  assert.equal(warnedMain.exitCode, 0);
+  assert.match(warnedMain.warnings.join("\n"), /Continuing with the body check/);
 
   const { outcomeAfterLabelWrite, applyRiskLabel } = bootstrapLabelApi();
   assert.equal(outcomeAfterLabelWrite([], "high", empty), problem);
   assert.match(outcomeAfterLabelWrite([], "high", { writeSucceeded: false }), /The pull request has no risk:\* label/);
-  assert.equal(outcomeAfterLabelWrite([], "high", { writeSucceeded: false, writeDenied: true }), null);
+  let deniedReads = 0;
+  const deniedWarnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    deniedWarnings.push(args.join(" "));
+  };
+  try {
+    const deniedWrite = await applyRiskLabel(async (method, apiPath) => {
+      if (method === "GET" && apiPath.includes("/issues/")) {
+        deniedReads += 1;
+        return [];
+      }
+      if (method === "GET" && apiPath.includes("/labels/")) return { name: "risk:high" };
+      if (method === "POST" && apiPath.includes("/issues/")) {
+        throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+      }
+      throw new Error(`unexpected ${method} ${apiPath}`);
+    }, "o", "r", 1);
+    assert.equal(deniedReads, 2);
+    assert.equal(deniedWrite.writeSucceeded, false);
+    assert.equal(deniedWrite.labelError.status, 403);
+    assert.equal(deniedWrite.labelProblem, null);
+    assert.match(deniedWarnings.join("\n"), /Continuing with the body check/);
+  } finally {
+    console.warn = originalWarn;
+  }
   let issueReads = 0;
   const applied = await applyRiskLabel(async (method, apiPath) => {
     if (method === "GET" && apiPath.includes("/issues/")) {
@@ -485,58 +670,39 @@ test("zero labels after a successful write fails", async () => {
   assert.equal(applied.labelProblem, problem);
 });
 
-test("a re-read with zero labels fails when nothing was written", () => {
-  const problem = riskLabelProblem([], "high", { writeSucceeded: false });
-  assert.equal(problem, "The pull request has no risk:* label.");
-  assert.equal(riskLabelProblem([], "high"), problem);
-  assert.equal(riskLabelProblem([], "medium", { writeSucceeded: false, writeDenied: true }), null);
-  const gate = finishGate({ labelError: null, failure: null, labelProblem: problem });
-  assert.equal(gate.rethrow, false);
-  assert.equal(gate.exitCode, 1);
-  assert.equal(gate.warning, null);
-  const { outcomeAfterLabelWrite } = bootstrapLabelApi();
-  assert.equal(outcomeAfterLabelWrite([], "high", { writeSucceeded: false }), problem);
-  assert.equal(outcomeAfterLabelWrite([], "low", { writeSucceeded: false, writeDenied: true }), null);
-  const script = fs.readFileSync(path.join(repoRoot(), "scripts/risk-tier.mjs"), "utf8");
-  const mainSource = script.slice(script.indexOf("async function main"));
-  assert.match(mainSource, /labelProblem = plan\.labelProblem/);
-  assert.match(mainSource, /labelProblem,/);
-  assert.doesNotMatch(mainSource, /labelError \? labelError\.labelProblem : null/);
+test("a label-exists 403 with zero labels on the re-read fails", async () => {
+  const problem = "The pull request has no risk:* label.";
+  await withGithub(labelGetDeniedRoute, async (calls) => {
+    await assert.rejects(syncLabel("token", "o", "r", 7, "high"), (error) => {
+      assert.equal(error.status, 403);
+      assert.equal(error.labelProblem, problem);
+      return true;
+    });
+    assertNoLabelWrite(calls);
+    assert.ok(calls.some((call) => call.method === "GET" && call.apiPath.includes("/labels/risk%3A")));
+  });
+  const ran = await runMain(labelGetDeniedRoute);
+  assert.equal(ran.exitCode, 1);
+  assert.match(ran.errors.join("\n"), /The pull request has no risk:\* label/);
+  assert.doesNotMatch(ran.summary, /Risk label:/);
+  assertNoLabelWrite(ran.calls);
 });
 
 test("a re-read that drops the correct label fails when nothing was written", async () => {
-  const starting = ["risk:high"];
-  const plan = planLabelUpdates(starting, "high");
-  assert.deepEqual(plan.add, []);
-  assert.deepEqual(plan.remove, []);
-  let writes = 0;
-  const settled = await settleLabelPlan(starting, plan, async () => {
-    writes += 1;
+  const problem = "The pull request has no risk:* label.";
+  await withGithub(droppedLabelRoute(), async (calls) => {
+    const plan = await syncLabel("token", "o", "r", 7, "high");
+    assert.equal(plan.labelProblem, problem);
+    assert.deepEqual(plan.add, []);
+    assert.deepEqual(plan.remove, []);
+    assertNoLabelWrite(calls);
+    assert.equal(calls.filter((call) => call.apiPath.includes("/issues/") && call.apiPath.includes("/labels")).length, 2);
   });
-  assert.equal(writes, 0);
-  assert.equal(settled.writeSucceeded, false);
-  const problem = riskLabelProblem([], "high", { writeSucceeded: settled.writeSucceeded });
-  assert.equal(problem, "The pull request has no risk:* label.");
-  const gate = finishGate({ labelError: null, failure: null, labelProblem: problem });
-  assert.equal(gate.exitCode, 1);
-  assert.equal(gate.rethrow, false);
-
-  const { outcomeAfterLabelWrite, applyRiskLabel } = bootstrapLabelApi();
-  assert.equal(outcomeAfterLabelWrite([], "high", { writeSucceeded: false }), problem);
-  let reads = 0;
-  const applied = await applyRiskLabel(async (method, apiPath) => {
-    if (method === "GET" && apiPath.includes("/issues/")) {
-      reads += 1;
-      return reads === 1 ? [{ name: "risk:high" }] : [];
-    }
-    if (method === "GET" && apiPath.includes("/labels/")) return { name: "risk:high" };
-    throw new Error(`unexpected ${method} ${apiPath}`);
-  }, "o", "r", 1);
-  assert.equal(reads, 2);
-  assert.equal(applied.writeSucceeded, false);
-  assert.equal(applied.labelError, null);
-  assert.equal(applied.readError, null);
-  assert.equal(applied.labelProblem, problem);
+  const ran = await runMain(droppedLabelRoute());
+  assert.equal(ran.exitCode, 1);
+  assert.match(ran.errors.join("\n"), /The pull request has no risk:\* label/);
+  assert.doesNotMatch(ran.summary, /Risk label:/);
+  assertNoLabelWrite(ran.calls);
 });
 
 test("a leftover higher label after a write fails", () => {
