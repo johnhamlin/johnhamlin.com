@@ -46,6 +46,12 @@ Lint:
 npm run lint
 ```
 
+Risk-tier tests:
+
+```bash
+npm test
+```
+
 Preview the production build:
 
 ```bash
@@ -64,7 +70,7 @@ Use `.github/pull_request_template.md`. Every pull request has these sections:
 
 - **Ticket.** The id and one line on what the change does.
 - **Proof.** A command and its real output. Paste the output.
-- **Risk tier.** Check one box in the template. The tier follows the change. Any file under `.github/workflows/` is high. `REVIEW.md`, `AGENTS.md`, `CLAUDE.md`, `.cursor/**`, and `.github/pull_request_template.md` are high.
+- **Risk tier.** Check one box in the template. The `risk:low`, `risk:medium`, or `risk:high` label is the source of truth. `.github/workflows/risk-tier.yml` computes it from the changed paths in `risk-tiers`. The pull request body does not set the tier. The check fails when no box is checked, or when the checked tier is lower than the computed tier. A path that matches nothing is medium. `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, `.cursor/**`, `.claude/**`, `.github/**`, `risk-tiers`, and `scripts/risk-tier.mjs` are always high.
 - **Review.** Rounds to pass, and the count of findings tagged Important, Nit, and Pre-existing.
 - **How to revert.** How to undo the change safely.
 

@@ -1,0 +1,41 @@
+# tier glob
+# A path that matches nothing is medium.
+# When a path matches more than one glob, the highest tier wins.
+# low < medium < high
+# These paths are also hardcoded as high in scripts/risk-tier.mjs.
+
+high AGENTS.md
+high CLAUDE.md
+high REVIEW.md
+high .cursor/**
+high .claude/**
+high .github/**
+high astro.config.mjs
+high lighthouserc.json
+high package.json
+high package-lock.json
+high risk-tiers
+high scripts/risk-tier.mjs
+high scripts/risk-tier.test.mjs
+high .env
+high .env.*
+high **/.env
+high **/.env.*
+high wrangler.toml
+high wrangler.json
+high wrangler.jsonc
+high _headers
+high _redirects
+high public/_headers
+high public/_redirects
+high src/content/drafts/**
+
+medium src/pages/**
+medium src/styles/**
+medium src/components/**
+medium src/layouts/**
+
+low docs/**
+low README.md
+low src/content/posts/**
+low src/content/resume.md

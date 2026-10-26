@@ -8,11 +8,11 @@
 
 ## Risk tier
 
-<!-- Check one. Definitions and what each tier requires are in REVIEW.md. -->
+<!-- Check one. The risk:* label is computed from the changed paths and is the source of truth. A missing check, or a checked tier lower than that label, fails CI. Definitions are in REVIEW.md. -->
 
 - [ ] low — posts, copy, and docs
-- [ ] medium — components, layouts, styles, and routing
-- [ ] high — astro.config, CI and Cloudflare deploy, redirects and headers, dependency upgrades, drafts or env, agent instruction files (`REVIEW.md`, `AGENTS.md`, `CLAUDE.md`, `.cursor/**`, this template)
+- [ ] medium — components, layouts, styles, routing, and any unmatched path
+- [ ] high — astro.config, CI and Cloudflare deploy, redirects and headers, dependency upgrades, drafts or env, agent instruction files (`REVIEW.md`, `AGENTS.md`, `CLAUDE.md`, `.cursor/**`, `.claude/**`, `.github/**`, `risk-tiers`, `scripts/risk-tier.mjs`, this template)
 
 Which high-risk trigger applies? (for example CI/deploy or secrets)
 

@@ -11,7 +11,8 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --test scripts/risk-tier.test.mjs"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.12",

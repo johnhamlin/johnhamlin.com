@@ -31,29 +31,35 @@ What failure looks like here: a post leaks a draft or the unredacted résumé, c
 
 ## Risk tiers by path
 
-The risk tier is set by the change, not the author. Use the highest tier the diff touches. Scale that tier by blast radius and by how easy a rollback is. A revert of one content file is easier than a config change that affects every request.
+The risk tier is set by the change, not the author. The `risk:low`, `risk:medium`, or `risk:high` label is the source of truth. `.github/workflows/risk-tier.yml` computes that label from the changed paths. `risk-tiers` maps globs to low, medium, or high. A path that matches nothing is medium. When a path matches more than one glob, the highest tier wins. The pull request body does not set the tier. The check fails when no box is checked, or when the checked tier is lower than the computed tier.
 
-Any file under `.github/workflows/` is always high. Agent instruction files are always high.
+Use the highest tier the diff touches. Scale that tier by blast radius and by how easy a rollback is. A revert of one content file is easier than a config change that affects every request.
+
+These paths are always high, including when `risk-tiers` says otherwise: `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, `.cursor/**`, `.claude/**`, `.github/**` (the pull request template and the workflows), `risk-tiers`, `scripts/risk-tier.mjs`, and `scripts/risk-tier.test.mjs`. `.github/CODEOWNERS` lists `@johnhamlin` on every high path.
 
 ### High
 
 - `astro.config.mjs`
-- `.github/workflows/` (including `ci.yml`) and `lighthouserc.json`
-- Cloudflare deploy config, redirects, and headers. None of those files are in the repo. Adding one is high.
-- Dependency upgrades in `package.json`, and the `package-lock.json` entries that belong to that upgrade
-- Anything that could leak drafts or env: a committed `.env` or `.env.*` file, a token, an unpublished post, or a résumé that is not redacted
-- Agent instruction files: `REVIEW.md`, `AGENTS.md`, `CLAUDE.md`, `.cursor/**`, and `.github/pull_request_template.md`. They steer every future agent, so a wrong line causes real damage.
+- `.github/**`, including workflows, `CODEOWNERS`, and `.github/pull_request_template.md`
+- `lighthouserc.json`
+- Cloudflare deploy config, redirects, and headers: `wrangler.toml`, `wrangler.json`, `wrangler.jsonc`, `_headers`, `_redirects`, `public/_headers`, and `public/_redirects`. None of those files are in the repo. Adding one is high.
+- `package.json` and `package-lock.json`. A dependency upgrade is not separable from other edits by path.
+- Anything that could leak drafts or env: `.env`, `.env.*`, and unpublished posts under `src/content/drafts/**`
+- Agent instruction files: `REVIEW.md`, `AGENTS.md`, `CLAUDE.md`, `.cursor/**`, and `.claude/**`. They steer every future agent, so a wrong line causes real damage.
+- `risk-tiers`, `scripts/risk-tier.mjs`, and `scripts/risk-tier.test.mjs`
 
 ### Medium
 
-- `src/pages/` for routing and page templates
-- `src/styles/` for styles
-- `src/components/` and `src/layouts/` when those directories exist
+- `src/pages/**` for routing and page templates
+- `src/styles/**` for styles
+- `src/components/**` and `src/layouts/**` when those directories exist
+- Any path `risk-tiers` does not list
 
 ### Low
 
-- `docs/` and `README.md`
-- Posts and other copy. There is no posts directory yet. A résumé file is low only when it is redacted.
+- `docs/**` and `README.md`
+- `src/content/posts/**`. There is no posts directory yet.
+- `src/content/resume.md`. A résumé file is low only when it is redacted.
 
 ## Repo-specific gotchas
 
@@ -74,6 +80,7 @@ npm run dev
 npm run check
 npm run build
 npm run lint
+npm test
 npm run preview
 npx lhci autorun
 gitleaks detect --source . --redact --verbose --exit-code 1 --log-opts="--all"

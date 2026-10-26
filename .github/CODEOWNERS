@@ -1,0 +1,27 @@
+# High paths from /risk-tiers. @johnhamlin owns each one.
+
+/AGENTS.md @johnhamlin
+/CLAUDE.md @johnhamlin
+/REVIEW.md @johnhamlin
+/.cursor/** @johnhamlin
+/.claude/** @johnhamlin
+/.github/** @johnhamlin
+/astro.config.mjs @johnhamlin
+/lighthouserc.json @johnhamlin
+/package.json @johnhamlin
+/package-lock.json @johnhamlin
+/risk-tiers @johnhamlin
+/scripts/risk-tier.mjs @johnhamlin
+/scripts/risk-tier.test.mjs @johnhamlin
+/.env @johnhamlin
+/.env.* @johnhamlin
+**/.env @johnhamlin
+**/.env.* @johnhamlin
+/wrangler.toml @johnhamlin
+/wrangler.json @johnhamlin
+/wrangler.jsonc @johnhamlin
+/_headers @johnhamlin
+/_redirects @johnhamlin
+/public/_headers @johnhamlin
+/public/_redirects @johnhamlin
+/src/content/drafts/** @johnhamlin
