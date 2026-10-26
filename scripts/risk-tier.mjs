@@ -258,7 +258,10 @@ export function riskLabelProblem(labels, computedTier, options = {}) {
   if (risk.length > 1) return "Label update left more than one risk:* label.";
   if (risk.length === 1) {
     const tier = risk[0].slice("risk:".length);
-    if (RANK[tier] == null || RANK[computedTier] == null || RANK[tier] < RANK[computedTier]) {
+    if (RANK[tier] != null && RANK[computedTier] != null && RANK[tier] > RANK[computedTier]) {
+      return `Risk label ${risk[0]} is higher than computed tier ${computedTier}.`;
+    }
+    if (RANK[tier] == null || RANK[computedTier] == null || RANK[tier] !== RANK[computedTier]) {
       return `Risk label ${risk[0]} is lower than computed tier ${computedTier}.`;
     }
     return null;
@@ -272,11 +275,12 @@ export function finishGate({ labelError, failure, labelProblem = null }) {
   if (labelError && !denied) {
     return { rethrow: true, exitCode: 1, warning: null, labelProblem: null };
   }
-  const warning = denied
-    ? `warning: label write was denied (403). Continuing with the body check. ${labelError.message}`
-    : null;
   const problem = labelProblem || null;
-  return { rethrow: false, exitCode: failure || problem ? 1 : 0, warning, labelProblem: problem };
+  const exitCode = failure || problem ? 1 : 0;
+  const warning = denied
+    ? `warning: label write was denied (403). ${exitCode === 0 ? "Continuing with the body check. " : ""}${labelError.message}`
+    : null;
+  return { rethrow: false, exitCode, warning, labelProblem: problem };
 }
 
 function isRiskLabel(name) {

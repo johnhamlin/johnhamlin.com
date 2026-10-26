@@ -276,11 +276,12 @@ test("a 403 on the label write still runs the body check", () => {
   assert.equal(blocked.rethrow, false);
   assert.equal(blocked.exitCode, 1);
   assert.match(blocked.warning, /403/);
-  assert.match(blocked.warning, /Continuing with the body check/);
+  assert.doesNotMatch(blocked.warning, /Continuing with the body check/);
 
   const clear = finishGate({ labelError: denied, failure: null });
   assert.equal(clear.exitCode, 0);
   assert.match(clear.warning, /403/);
+  assert.match(clear.warning, /Continuing with the body check/);
 
   const other = finishGate({
     labelError: Object.assign(new Error("boom"), { status: 500 }),
@@ -389,7 +390,8 @@ test("a 403 midway through a label update never passes with two risk labels", as
   assert.equal(blockedGate.rethrow, false);
   assert.equal(blockedGate.exitCode, 1);
   assert.match(blockedGate.labelProblem, /more than one risk/);
-  assert.match(blockedGate.warning, /Continuing with the body check/);
+  assert.match(blockedGate.warning, /403/);
+  assert.doesNotMatch(blockedGate.warning, /Continuing with the body check/);
 
   let failedRemove = false;
   const cleared = await settleLabelPlan(starting, plan, async (action) => {
@@ -428,10 +430,11 @@ test("a refused add that leaves risk:low fails when the tier is higher", async (
   const gate = finishGate({ labelError: settled.error, failure: null, labelProblem });
   assert.equal(gate.rethrow, false);
   assert.equal(gate.exitCode, 1);
-  assert.match(gate.warning, /Continuing with the body check/);
+  assert.match(gate.warning, /403/);
+  assert.doesNotMatch(gate.warning, /Continuing with the body check/);
   assert.equal(riskLabelProblem([], "high"), null);
   assert.equal(riskLabelProblem(["risk:high"], "high"), null);
-  assert.equal(riskLabelProblem(["risk:high"], "medium"), null);
+  assert.match(riskLabelProblem(["risk:high"], "medium"), /higher than computed tier medium/);
   assert.match(riskLabelProblem(["risk:medium"], "high"), /lower than computed tier high/);
   const workflow = fs.readFileSync(path.join(repoRoot(), ".github/workflows/risk-tier.yml"), "utf8");
   const bootstrap = bootstrapSource(workflow);
@@ -453,7 +456,8 @@ test("zero labels after a successful write fails", async () => {
   const failed = finishGate({ labelError: denied, failure: null, labelProblem: problem });
   assert.equal(failed.rethrow, false);
   assert.equal(failed.exitCode, 1);
-  assert.match(failed.warning, /Continuing with the body check/);
+  assert.match(failed.warning, /403/);
+  assert.doesNotMatch(failed.warning, /Continuing with the body check/);
   const warned = finishGate({
     labelError: denied,
     failure: null,
@@ -478,6 +482,17 @@ test("zero labels after a successful write fails", async () => {
   assert.equal(applied.writeSucceeded, true);
   assert.equal(applied.readError, null);
   assert.equal(applied.labelProblem, problem);
+});
+
+test("a leftover higher label after a write fails", () => {
+  const problem = riskLabelProblem(["risk:high"], "medium", { writeSucceeded: true });
+  assert.match(problem, /Risk label risk:high is higher than computed tier medium\./);
+  assert.equal(riskLabelProblem(["risk:medium"], "medium", { writeSucceeded: true }), null);
+  assert.equal(riskLabelProblem(["risk:high"], "high", { writeSucceeded: true }), null);
+  const { outcomeAfterLabelWrite } = bootstrapLabelApi();
+  assert.equal(outcomeAfterLabelWrite(["risk:high"], "medium", { writeSucceeded: true }), problem);
+  assert.equal(outcomeAfterLabelWrite(["risk:medium"], "medium", { writeSucceeded: true }), null);
+  assert.equal(outcomeAfterLabelWrite(["risk:high"], "high", { writeSucceeded: true }), null);
 });
 
 test("an unknown risk label fails", async () => {
@@ -526,7 +541,8 @@ test("a recovery write succeeds and then the re-read gets a 403, which fails", a
   const gate = finishGate({ labelError: settled.error, failure: null, labelProblem: problem });
   assert.equal(gate.rethrow, false);
   assert.equal(gate.exitCode, 1);
-  assert.match(gate.warning, /Continuing with the body check/);
+  assert.match(gate.warning, /403/);
+  assert.doesNotMatch(gate.warning, /Continuing with the body check/);
   assert.equal(riskLabelProblem(["risk:high"], "high", { writeSucceeded: false, readError }), null);
   assert.equal(riskLabelProblem([], "high", { writeSucceeded: false, readError }), null);
 

@@ -219,14 +219,17 @@ jobs:
               const readError = state && state.readError ? state.readError : null;
               if (writeSucceeded && readError) return "Could not re-read labels after a successful label write.";
               const names = Array.isArray(labels) ? labels : [];
-              const unknown = names.filter((name) => name.indexOf("risk:") === 0 && name !== "risk:low" && name !== "risk:medium" && name !== "risk:high");
+              const unknown = names.filter((name) => typeof name === "string" && name.indexOf("risk:") === 0 && name !== "risk:low" && name !== "risk:medium" && name !== "risk:high");
               if (unknown.length > 0) return "Risk label " + unknown[0] + " is not a known risk tier.";
               const riskNames = names.filter((name) => name === "risk:low" || name === "risk:medium" || name === "risk:high");
               const rank = { low: 0, medium: 1, high: 2 };
               if (riskNames.length > 1) return "Label update left more than one risk:* label.";
               if (riskNames.length === 1) {
                 const tier = riskNames[0].slice("risk:".length);
-                if (rank[tier] == null || rank[computedTier] == null || rank[tier] < rank[computedTier]) {
+                if (rank[tier] != null && rank[computedTier] != null && rank[tier] > rank[computedTier]) {
+                  return "Risk label " + riskNames[0] + " is higher than computed tier " + computedTier + ".";
+                }
+                if (rank[tier] == null || rank[computedTier] == null || rank[tier] !== rank[computedTier]) {
                   return "Risk label " + riskNames[0] + " is lower than computed tier high.";
                 }
                 return null;
