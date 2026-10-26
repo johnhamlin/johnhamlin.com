@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
   applyLabelPlan,
+  changedFilesFailure,
   changedPaths,
   claimFailure,
   computeTier,
+  decideTier,
   defaultTiersPath,
   failClosedReason,
   finishGate,
@@ -16,9 +20,58 @@ import {
   parseClaimedTier,
   planLabelUpdates,
   repoRoot,
+  settleLabelPlan,
+  unsafePathReason,
 } from "./risk-tier.mjs";
 
 const rules = loadTiersFile();
+
+function riskBody(lines) {
+  return `## Ticket\n- [x] low outside the section\n\n## Risk tier\n${lines}\n\n## Review\n- [x] medium outside the section\n`;
+}
+
+function shellSteps(job) {
+  const steps = [];
+  const lines = job.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const inline = lines[index].match(/^ {8}run: ([^|].*)$/);
+    if (inline) {
+      steps.push(inline[1]);
+      continue;
+    }
+    if (!/^ {8}run: \|$/.test(lines[index])) continue;
+    const body = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const current = lines[cursor];
+      if (current.startsWith("          ")) {
+        body.push(current.slice(10));
+        index = cursor;
+        continue;
+      }
+      if (current.trim() === "") {
+        body.push("");
+        index = cursor;
+        continue;
+      }
+      break;
+    }
+    steps.push(body.join("\n"));
+  }
+  return steps;
+}
+
+function bootstrapSource(workflow) {
+  const marker = "BOOTSTRAP_SOURCE: |\n";
+  const start = workflow.indexOf(marker);
+  assert.ok(start !== -1);
+  const lines = [];
+  for (const line of workflow.slice(start + marker.length).split("\n")) {
+    if (line.startsWith("            ")) lines.push(line.slice(12));
+    else if (line.trim() === "") lines.push("");
+    else break;
+  }
+  return `${lines.join("\n")}\n`;
+}
 
 test("a REVIEW.md-only change is high", () => {
   assert.equal(computeTier(["REVIEW.md"], rules), "high");
@@ -38,7 +91,7 @@ test("a post or copy-only change is low", () => {
 
 test("a low claim on a high change fails", () => {
   const claimed = parseClaimedTier(
-    ["- [x] low — posts, copy, and docs", "- [ ] medium — components", "- [ ] high — ci"].join("\n"),
+    riskBody(["- [x] low — posts, copy, and docs", "- [ ] medium — components", "- [ ] high — ci"].join("\n")),
   );
   assert.equal(claimed.ok, true);
   assert.equal(claimed.tier, "low");
@@ -69,7 +122,7 @@ test("stale labels are replaced", () => {
 });
 
 test("no checked tier fails", () => {
-  const claimed = parseClaimedTier("- [ ] low — posts\n- [ ] medium — pages\n- [ ] high — ci\n");
+  const claimed = parseClaimedTier(riskBody("- [ ] low — posts\n- [ ] medium — pages\n- [ ] high — ci\n"));
   assert.equal(claimed.ok, false);
   assert.equal(claimed.message, "No risk tier is checked in the pull request body.");
 });
@@ -118,6 +171,11 @@ test("agent instruction files match at any depth", () => {
   assert.equal(computeTier(["notes/REVIEW.md"], lowered), "high");
   assert.equal(computeTier(["docs/AGENTS.md"], lowered), "high");
   assert.equal(computeTier(["src/content/posts/nested/AGENTS.md"], lowered), "high");
+  assert.equal(computeTier(["docs/agents.md"], rules), "high");
+  assert.equal(computeTier(["src/content/posts/Review.md"], rules), "high");
+  assert.equal(computeTier(["packages/web/claude.MD"], rules), "high");
+  assert.equal(globToRegExp("**/AGENTS.md").flags.includes("i"), true);
+  assert.equal(globToRegExp("README.md").flags.includes("i"), false);
   const tiersText = fs.readFileSync(defaultTiersPath(), "utf8");
   const owners = fs.readFileSync(path.join(repoRoot(), ".github/CODEOWNERS"), "utf8");
   for (const glob of ["**/AGENTS.md", "**/CLAUDE.md", "**/REVIEW.md"]) {
@@ -159,13 +217,13 @@ test("dotfiles match their globs", () => {
 });
 
 test("more than one ticked tier fails", () => {
-  const claimed = parseClaimedTier("- [x] low — posts\n- [x] medium — pages\n- [ ] high — ci\n");
+  const claimed = parseClaimedTier(riskBody("- [x] low — posts\n- [x] medium — pages\n- [ ] high — ci\n"));
   assert.equal(claimed.ok, false);
   assert.equal(claimed.message, "The pull request body checks more than one risk tier.");
 });
 
 test("a ticked tier higher than the computed one passes", () => {
-  const claimed = parseClaimedTier("- [ ] low — posts\n- [ ] medium — pages\n- [x] high — ci\n");
+  const claimed = parseClaimedTier(riskBody("- [ ] low — posts\n- [ ] medium — pages\n- [x] high — ci\n"));
   assert.equal(claimed.ok, true);
   assert.equal(claimed.tier, "high");
   assert.equal(claimFailure(claimed.tier, computeTier(["README.md"], rules)), null);
@@ -199,6 +257,114 @@ test("a 403 on the label write still runs the body check", () => {
     failure: null,
   });
   assert.equal(other.rethrow, true);
+});
+
+test("a tier suffix is not a claim in either parser", () => {
+  const workflow = fs.readFileSync(path.join(repoRoot(), ".github/workflows/risk-tier.yml"), "utf8");
+  const source = bootstrapSource(workflow);
+  const start = source.indexOf("function parseChecked");
+  const end = source.indexOf("// end parseChecked");
+  assert.ok(start !== -1 && end > start);
+  const parseChecked = new Function(`${source.slice(start, end)}\nreturn parseChecked;`)();
+  const samples = [
+    ["- [x] low-priority", false, null],
+    ["- [x] high-priority", false, null],
+    ["- [x] medium-rare", false, null],
+    ["- [x] low", true, "low"],
+    ["- [x] high — ci", true, "high"],
+    ["- [x] medium — pages", true, "medium"],
+  ];
+  for (const [line, ok, tier] of samples) {
+    const body = riskBody(line);
+    const claimed = parseClaimedTier(body);
+    assert.equal(claimed.ok, ok, line);
+    if (ok) assert.equal(claimed.tier, tier, line);
+    const checked = parseChecked(body);
+    assert.deepEqual(checked, ok ? [tier] : [], line);
+  }
+  const outside = "## Ticket\n- [x] high\n\n## Review\n- [x] low\n";
+  assert.equal(parseClaimedTier(outside).ok, false);
+  assert.deepEqual(parseChecked(outside), []);
+});
+
+test("changed paths are matched literally", () => {
+  assert.equal(unsafePathReason(["src/content/posts/hello.md"]), null);
+  assert.equal(computeTier(["src/content/posts/hello.md"], rules), "low");
+  assert.match(unsafePathReason(["src/content/posts\\hello.md"]), /\\/);
+  assert.equal(computeTier(["src/content/posts\\hello.md"], rules), "high");
+  assert.match(String(unsafePathReason(["docs/../REVIEW.md"])), /\.\./);
+  assert.equal(computeTier(["docs/../REVIEW.md"], rules), "high");
+  assert.equal(computeTier(["README.md", "src/../secret.md"], rules), "high");
+  assert.equal(unsafePathReason(["foo..bar"]), null);
+  assert.equal(computeTier(["foo..bar"], rules), "medium");
+  assert.equal(computeTier(["docs/notes..md"], rules), "low");
+});
+
+test("invalid risk-tiers or a files page cap fails closed to high", () => {
+  assert.throws(() => loadTiers("not a tier\n"), /risk-tiers:1/);
+  assert.equal(
+    decideTier({
+      tiersFailure: "risk-tiers is invalid. The tier fails closed to high.",
+      paths: ["README.md"],
+      rules,
+    }),
+    "high",
+  );
+  const cap = changedFilesFailure(3000, 3000, true);
+  assert.match(cap, /page cap of 3000/);
+  assert.match(cap, /fails closed to high/);
+  assert.match(changedFilesFailure(2, 5, false), /fewer than pull_request\.changed_files \(5\)/);
+  assert.match(changedFilesFailure(1, Number.NaN, false), /changed_files is missing/);
+  assert.equal(changedFilesFailure(4, 4, false), null);
+  assert.equal(decideTier({ listFailure: cap, paths: ["README.md"], rules }), "high");
+  assert.equal(decideTier({ unsafeFailure: unsafePathReason(["a\\b"]), paths: ["a\\b"], rules }), "high");
+  const script = fs.readFileSync(path.join(repoRoot(), "scripts/risk-tier.mjs"), "utf8");
+  const mainSource = script.slice(script.indexOf("async function main"));
+  const failureAt = mainSource.indexOf("tiersFailure");
+  const syncAt = mainSource.indexOf("syncLabel(token, owner, repo, number, computed)");
+  assert.ok(failureAt !== -1 && syncAt > failureAt);
+  const workflow = fs.readFileSync(path.join(repoRoot(), ".github/workflows/risk-tier.yml"), "utf8");
+  assert.match(workflow, /The files API page cap of /);
+  assert.match(workflow, /risk-tiers is invalid/);
+  assert.match(workflow, /contains a \.\. segment/);
+});
+
+test("a 403 midway through a label update never passes with two risk labels", async () => {
+  const denied = Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
+  const starting = ["risk:low", "bug"];
+  const plan = planLabelUpdates(starting, "high");
+  let removes = 0;
+  const blocked = await settleLabelPlan(starting, plan, async (action) => {
+    if (action.op === "remove") {
+      removes += 1;
+      throw denied;
+    }
+  });
+  assert.ok(removes >= 1);
+  assert.equal(blocked.conflict, true);
+  assert.deepEqual(blocked.risk.slice().sort(), ["risk:high", "risk:low"]);
+  const blockedGate = finishGate({ labelError: blocked.error, failure: null, conflict: blocked.conflict });
+  assert.equal(blockedGate.rethrow, false);
+  assert.equal(blockedGate.exitCode, 1);
+  assert.match(blockedGate.conflictFailure, /more than one risk/);
+
+  let failedRemove = false;
+  const cleared = await settleLabelPlan(starting, plan, async (action) => {
+    if (action.op === "remove" && !failedRemove) {
+      failedRemove = true;
+      throw denied;
+    }
+  });
+  assert.deepEqual(cleared.risk, ["risk:high"]);
+  assert.equal(cleared.conflict, false);
+  assert.equal(finishGate({ labelError: cleared.error, failure: null, conflict: cleared.conflict }).exitCode, 0);
+
+  const fork = await settleLabelPlan(["risk:low"], planLabelUpdates(["risk:low"], "high"), async () => {
+    throw denied;
+  });
+  assert.equal(fork.conflict, false);
+  assert.deepEqual(fork.risk, ["risk:low"]);
+  assert.equal(finishGate({ labelError: fork.error, failure: null, conflict: fork.conflict }).exitCode, 0);
 });
 
 function extractJob(workflow, name) {
@@ -239,7 +405,15 @@ test("the workflow runs the base script and fails closed when it is missing", ()
   assert.match(tier, /github\.event\.pull_request\.base\.sha/);
   assert.match(tier, /node scripts\/risk-tier\.mjs/);
   assert.match(tier, /persist-credentials:\s*false/);
+  assert.match(tier, /runs-on:\s*ubuntu-slim/);
+  assert.match(tier, /cancel-in-progress:\s*false/);
+  assert.match(tier, /risk-tier-label-/);
+  assert.doesNotMatch(tier, /cancel-in-progress:\s*true/);
   assert.match(tier, /computed high/);
+  assert.match(testJob, /PR_NUMBER: \$\{\{ github\.event\.pull_request\.number \}\}/);
+  for (const scriptText of shellSteps(testJob)) {
+    assert.doesNotMatch(scriptText, /\$\{\{/);
+  }
   assert.match(script, /\/pulls\/\$\{number\}\/files\?per_page=100&page=\$\{page\}/);
   assert.match(script, /previous_filename/);
   assert.doesNotMatch(script, /git diff/);
@@ -272,11 +446,6 @@ test("the workflow runs the base script and fails closed when it is missing", ()
 });
 
 test("a malicious yarnrc in the pull request cannot run in the label job", () => {
-  const yarnrc = 'yarn-path "./.yarn/releases/evil.js"\n';
-  const evil = "import { writeFileSync } from 'node:fs';\nwriteFileSync('/tmp/yarn-path-executed', 'ran');\n";
-  assert.match(yarnrc, /^yarn-path "\.\/\.yarn\/releases\/evil\.js"$/m);
-  assert.match(evil, /writeFileSync\('\/tmp\/yarn-path-executed'/);
-
   const workflow = fs.readFileSync(path.join(repoRoot(), ".github/workflows/risk-tier.yml"), "utf8");
   const tier = extractJob(workflow, "tier");
   assert.doesNotMatch(tier, /setup-node/);
@@ -289,6 +458,58 @@ test("a malicious yarnrc in the pull request cannot run in the label job", () =>
   assert.match(tier, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
   assert.match(tier, /persist-credentials:\s*false/);
   assert.equal((tier.match(/uses:\s*actions\/checkout@/g) ?? []).length, 1);
+
+  const steps = shellSteps(tier);
+  assert.ok(steps.some((script) => script.includes("node scripts/risk-tier.mjs")));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "risk-tier-bin-"));
+  const log = path.join(bin, "calls.log");
+  const marker = path.join(bin, "pwned");
+  for (const name of ["npm", "yarn", "npx"]) {
+    const file = path.join(bin, name);
+    fs.writeFileSync(file, "#!/bin/sh\necho \"$0 $*\" >> \"$LABEL_JOB_CALL_LOG\"\nexit 0\n");
+    fs.chmodSync(file, 0o755);
+  }
+  const yarnrcPath = path.join(repoRoot(), ".yarnrc");
+  const yarnDir = path.join(repoRoot(), ".yarn");
+  const yarnDirExisted = fs.existsSync(yarnDir);
+  const evilPath = path.join(yarnDir, "releases", "evil.js");
+  fs.mkdirSync(path.dirname(evilPath), { recursive: true });
+  fs.writeFileSync(yarnrcPath, "yarn-path \"./.yarn/releases/evil.js\"\n");
+  fs.writeFileSync(evilPath, `require("fs").writeFileSync(${JSON.stringify(marker)}, "ran");\n`);
+  try {
+    const probe = spawnSync(path.join(bin, "yarn"), ["--version"], {
+      env: { ...process.env, LABEL_JOB_CALL_LOG: log, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+    });
+    assert.equal(probe.status, 0);
+    assert.match(fs.readFileSync(log, "utf8"), /yarn/);
+    fs.writeFileSync(log, "");
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      LABEL_JOB_CALL_LOG: log,
+      GITHUB_TOKEN: "",
+      GH_TOKEN: "",
+      GITHUB_OUTPUT: path.join(bin, "github-output"),
+      GITHUB_STEP_SUMMARY: "",
+      GITHUB_EVENT_PATH: "",
+      BOOTSTRAP_SOURCE: bootstrapSource(workflow),
+    };
+    for (const script of steps) {
+      spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], {
+        cwd: repoRoot(),
+        env,
+        encoding: "utf8",
+      });
+    }
+    assert.equal(fs.existsSync(marker), false);
+    assert.equal(fs.readFileSync(log, "utf8"), "");
+  } finally {
+    fs.rmSync(yarnrcPath, { force: true });
+    if (yarnDirExisted) fs.rmSync(evilPath, { force: true });
+    else fs.rmSync(yarnDir, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test("CODEOWNERS lists johnhamlin on every high glob", () => {

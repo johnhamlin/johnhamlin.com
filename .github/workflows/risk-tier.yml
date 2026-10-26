@@ -3,18 +3,15 @@ name: Risk tier
 # pull_request, not pull_request_target.
 # The label job checks out only the base commit. Pull request files are never
 # on disk there, including no head checkout and no merge commit. Changed paths
-# come from the GitHub API. Node is the runner's preinstalled binary: that job
-# does not run setup-node, npm, or yarn. Tests are a separate job with no
-# token and no base checkout.
+# come from the GitHub API. Node is the ubuntu-slim image's preinstalled
+# binary. That job does not run setup-node, npm, or yarn. Its concurrency
+# group does not cancel an in-progress label update. Tests are a separate job
+# with no token and no base checkout.
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
 
 permissions: {}
-
-concurrency:
-  group: risk-tier-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
 
 jobs:
   test:
@@ -22,15 +19,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
+    concurrency:
+      group: risk-tier-test-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
       - name: Checkout pull request
         env:
           GITHUB_TOKEN: ""
           GIT_TERMINAL_PROMPT: "0"
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           git init .
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth 1 origin "pull/${{ github.event.pull_request.number }}/head"
+          git fetch --depth 1 origin "pull/${PR_NUMBER}/head"
           git checkout --detach FETCH_HEAD
 
       - name: Setup Node
@@ -45,8 +46,11 @@ jobs:
 
   tier:
     name: Risk tier
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 5
+    concurrency:
+      group: risk-tier-label-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     permissions:
       contents: read
       pull-requests: write
@@ -79,6 +83,25 @@ jobs:
           BOOTSTRAP_SOURCE: |
             import fs from "node:fs";
 
+            function parseChecked(body) {
+              const text = String(body ?? "");
+              const heading = text.match(/^## Risk tier\s*$/m);
+              let section = "";
+              if (heading) {
+                const start = heading.index + heading[0].length;
+                const rest = text.slice(start);
+                const next = rest.search(/^## /m);
+                section = next === -1 ? rest : rest.slice(0, next);
+              }
+              const checked = [];
+              for (const line of section.split(/\r?\n/)) {
+                const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?=\s|$)/);
+                if (match && (match[1] === "x" || match[1] === "X")) checked.push(match[2]);
+              }
+              return checked;
+            }
+            // end parseChecked
+
             const token = process.env.GITHUB_TOKEN;
             const repository = process.env.GITHUB_REPOSITORY;
             if (!token) throw new Error("GITHUB_TOKEN is not set");
@@ -87,11 +110,7 @@ jobs:
             const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
             const number = event.pull_request.number;
             const body = String(event.pull_request.body ?? "");
-            const checked = [];
-            for (const line of body.split(/\r?\n/)) {
-              const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)\b/);
-              if (match && (match[1] === "x" || match[1] === "X")) checked.push(match[2]);
-            }
+            const checked = parseChecked(body);
             const missing = [];
             if (!fs.existsSync("scripts/risk-tier.mjs")) missing.push("scripts/risk-tier.mjs");
             if (!fs.existsSync("risk-tiers")) missing.push("risk-tiers");
@@ -105,6 +124,17 @@ jobs:
             if (checked.length === 0) failure = "No risk tier is checked in the pull request body.";
             else if (checked.length > 1) failure = "The pull request body checks more than one risk tier.";
             else if (checked[0] !== "high") failure = "Claimed risk tier " + checked[0] + " is lower than computed tier high.";
+            if (fs.existsSync("risk-tiers")) {
+              const tierLines = fs.readFileSync("risk-tiers", "utf8").split(/\r?\n/);
+              for (let index = 0; index < tierLines.length; index += 1) {
+                const line = tierLines[index].trim();
+                if (!line || line.startsWith("#")) continue;
+                if (!/^(low|medium|high)\s+\S/.test(line)) {
+                  console.log("risk-tiers is invalid. The tier fails closed to high. risk-tiers:" + (index + 1) + ": expected \"tier glob\"");
+                  break;
+                }
+              }
+            }
 
             const headers = {
               Accept: "application/vnd.github+json",
@@ -136,6 +166,56 @@ jobs:
               }
               return parsed;
             }
+            const FILES_API_CAP = 3000;
+            function unsafePathReason(filePaths) {
+              for (const filePath of filePaths) {
+                if (filePath.includes("\\")) return "Changed path " + JSON.stringify(filePath) + " contains \\. The tier fails closed to high.";
+                if (filePath.split("/").includes("..")) return "Changed path " + JSON.stringify(filePath) + " contains a .. segment. The tier fails closed to high.";
+              }
+              return null;
+            }
+            function changedFilesFailure(returnedCount, changedFiles, capHit) {
+              if (capHit) return "The files API page cap of " + FILES_API_CAP + " was hit (" + returnedCount + " files returned). The tier fails closed to high.";
+              if (!Number.isInteger(changedFiles) || changedFiles < 0) return "pull_request.changed_files is missing. The tier fails closed to high.";
+              if (!Number.isInteger(returnedCount) || returnedCount < changedFiles) {
+                const count = Number.isInteger(returnedCount) ? returnedCount : 0;
+                return "The files API returned " + count + " files, fewer than pull_request.changed_files (" + changedFiles + "). The list stops at " + FILES_API_CAP + ". The tier fails closed to high.";
+              }
+              return null;
+            }
+            try {
+              const files = [];
+              let capHit = false;
+              for (let page = 1; ; page += 1) {
+                const batch = await github("GET", "/repos/" + owner + "/" + repo + "/pulls/" + number + "/files?per_page=100&page=" + page);
+                if (!Array.isArray(batch) || batch.length === 0) break;
+                const room = FILES_API_CAP - files.length;
+                if (batch.length > room) {
+                  files.push(...batch.slice(0, room));
+                  capHit = true;
+                  break;
+                }
+                files.push(...batch);
+                if (files.length >= FILES_API_CAP) {
+                  capHit = true;
+                  break;
+                }
+                if (batch.length < 100) break;
+              }
+              const paths = [];
+              for (const file of files) {
+                if (file.filename) paths.push(file.filename);
+                if (file.previous_filename) paths.push(file.previous_filename);
+              }
+              const listFailure = changedFilesFailure(files.length, event.pull_request.changed_files, capHit);
+              const pathFailure = unsafePathReason(paths);
+              if (listFailure) console.log(listFailure);
+              if (pathFailure) console.log(pathFailure);
+            } catch (error) {
+              console.warn("warning: could not read the changed-file list. The tier stays high. " + error.message);
+            }
+            let names = [];
+            let labelError = null;
             try {
               const spec = { name: "risk:high", color: "b60205", description: "Computed path risk tier is high." };
               const encoded = encodeURIComponent(spec.name);
@@ -150,23 +230,39 @@ jobs:
                 }
               }
               const current = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
-              const names = Array.isArray(current) ? current.map((label) => label.name) : [];
-              for (const name of names) {
-                if (name !== "risk:high" && (name === "risk:low" || name === "risk:medium")) {
-                  try {
-                    await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
-                  } catch (error) {
-                    if (error.status !== 404) throw error;
-                  }
-                }
-              }
+              names = Array.isArray(current) ? current.map((label) => label.name) : [];
               if (!names.includes("risk:high")) {
                 await github("POST", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels", { labels: ["risk:high"] });
+                names.push("risk:high");
+              }
+              for (const name of ["risk:low", "risk:medium"]) {
+                if (!names.includes(name)) continue;
+                try {
+                  await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+                names = names.filter((item) => item !== name);
               }
               console.log("risk label: risk:high");
             } catch (error) {
+              labelError = error;
+              for (const name of ["risk:low", "risk:medium"]) {
+                if (!names.includes(name)) continue;
+                try {
+                  await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
+                  names = names.filter((item) => item !== name);
+                } catch (cleanupError) {
+                  if (cleanupError.status === 404) names = names.filter((item) => item !== name);
+                }
+              }
               if (error.status !== 403) throw error;
               console.warn("warning: label write was denied (403). Continuing with the body check. " + error.message);
+            }
+            const riskNames = names.filter((name) => name === "risk:low" || name === "risk:medium" || name === "risk:high");
+            if (riskNames.length > 1) {
+              console.error("Label update left more than one risk:* label.");
+              process.exitCode = 1;
             }
             if (process.env.GITHUB_STEP_SUMMARY) {
               fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "Risk label: `risk:high`\n\n" + reason + ". The tier fails closed to high.\n");

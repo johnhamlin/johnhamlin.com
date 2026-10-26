@@ -23,6 +23,9 @@ const LABEL_SPECS = [
   { name: "risk:high", color: "b60205", description: "Computed path risk tier is high." },
 ];
 
+const CASE_INSENSITIVE_NAMES = new Set(["agents.md", "claude.md", "review.md"]);
+const RISK_LABELS = new Set(["risk:low", "risk:medium", "risk:high"]);
+
 // Floor. A pull request cannot downgrade these by editing risk-tiers.
 // AGENTS.md, CLAUDE.md, and REVIEW.md match at any depth.
 export const ALWAYS_HIGH = [
@@ -42,7 +45,9 @@ const ALWAYS_HIGH_RULES = ALWAYS_HIGH.map((glob) => ({
   regex: globToRegExp(glob),
 }));
 
-const CHECKBOX = /^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)\b/;
+const CHECKBOX = /^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?=\s|$)/;
+
+export const FILES_API_CAP = 3000;
 
 export function repoRoot() {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -80,11 +85,29 @@ export function globToRegExp(glob) {
     index += 1;
   }
   // `s` makes `**` (`.*`) match a newline inside a path.
-  return new RegExp(`^${source}$`, glob.includes("**") ? "s" : undefined);
+  // AGENTS.md, CLAUDE.md, and REVIEW.md match in any case. Other globs do not.
+  return new RegExp(`^${source}$`, regexFlags(glob));
 }
 
-export function normalizePath(filePath) {
-  return filePath.replaceAll("\\", "/").replace(/^\.\//, "").replace(/^\/+/, "");
+function regexFlags(glob) {
+  let flags = "";
+  if (glob.includes("**")) flags += "s";
+  const base = glob.slice(glob.lastIndexOf("/") + 1).toLowerCase();
+  if (CASE_INSENSITIVE_NAMES.has(base)) flags += "i";
+  return flags === "" ? undefined : flags;
+}
+
+export function unsafePathReason(filePaths) {
+  for (const filePath of filePaths) {
+    if (typeof filePath !== "string") continue;
+    if (filePath.includes("\\")) {
+      return `Changed path ${JSON.stringify(filePath)} contains \\. The tier fails closed to high.`;
+    }
+    if (filePath.split("/").includes("..")) {
+      return `Changed path ${JSON.stringify(filePath)} contains a .. segment. The tier fails closed to high.`;
+    }
+  }
+  return null;
 }
 
 export function loadTiers(text) {
@@ -117,24 +140,45 @@ function higherTier(left, right) {
 }
 
 export function tierForPath(filePath, rules) {
-  const normalized = normalizePath(filePath);
+  if (unsafePathReason([filePath])) return "high";
+  const literal = String(filePath);
   let best = null;
   for (const rule of rules) {
-    if (rule.regex.test(normalized)) best = higherTier(best, rule.tier);
+    if (rule.regex.test(literal)) best = higherTier(best, rule.tier);
   }
   for (const rule of ALWAYS_HIGH_RULES) {
-    if (rule.regex.test(normalized)) best = "high";
+    if (rule.regex.test(literal)) best = "high";
   }
   return best ?? "medium";
 }
 
 export function computeTier(filePaths, rules) {
   if (filePaths.length === 0) return "medium";
+  if (unsafePathReason(filePaths)) return "high";
   let best = null;
   for (const filePath of filePaths) {
     best = higherTier(best, tierForPath(filePath, rules));
   }
   return best ?? "medium";
+}
+
+export function changedFilesFailure(returnedCount, changedFiles, capHit) {
+  if (capHit) {
+    return `The files API page cap of ${FILES_API_CAP} was hit (${returnedCount} files returned). The tier fails closed to high.`;
+  }
+  if (!Number.isInteger(changedFiles) || changedFiles < 0) {
+    return "pull_request.changed_files is missing. The tier fails closed to high.";
+  }
+  if (!Number.isInteger(returnedCount) || returnedCount < changedFiles) {
+    const count = Number.isInteger(returnedCount) ? returnedCount : 0;
+    return `The files API returned ${count} files, fewer than pull_request.changed_files (${changedFiles}). The list stops at ${FILES_API_CAP}. The tier fails closed to high.`;
+  }
+  return null;
+}
+
+export function decideTier({ tiersFailure, listFailure, unsafeFailure, paths, rules }) {
+  if (tiersFailure || listFailure || unsafeFailure) return "high";
+  return computeTier(paths, rules);
 }
 
 export function changedPaths(files) {
@@ -146,9 +190,19 @@ export function changedPaths(files) {
   return paths;
 }
 
+export function riskTierSection(body) {
+  const text = String(body ?? "");
+  const heading = text.match(/^## Risk tier\s*$/m);
+  if (!heading || heading.index === undefined) return "";
+  const start = heading.index + heading[0].length;
+  const rest = text.slice(start);
+  const next = rest.search(/^## /m);
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
 export function parseClaimedTier(body) {
   const checked = [];
-  for (const line of String(body ?? "").split(/\r?\n/)) {
+  for (const line of riskTierSection(body).split(/\r?\n/)) {
     const match = line.match(CHECKBOX);
     if (!match) continue;
     if (match[1] === "x" || match[1] === "X") checked.push(match[2]);
@@ -189,15 +243,57 @@ export function failClosedReason(missing) {
   return `base has no ${missing.join(" and ")}`;
 }
 
-export function finishGate({ labelError, failure }) {
+export function finishGate({ labelError, failure, conflict = false }) {
   const denied = Boolean(labelError && labelError.status === 403);
   if (labelError && !denied) {
-    return { rethrow: true, exitCode: 1, warning: null };
+    return { rethrow: true, exitCode: 1, warning: null, conflictFailure: null };
   }
   const warning = denied
     ? `warning: label write was denied (403). Continuing with the body check. ${labelError.message}`
     : null;
-  return { rethrow: false, exitCode: failure ? 1 : 0, warning };
+  const conflictFailure = conflict ? "Label update left more than one risk:* label." : null;
+  return { rethrow: false, exitCode: failure || conflictFailure ? 1 : 0, warning, conflictFailure };
+}
+
+function isRiskLabel(name) {
+  return RISK_LABELS.has(name);
+}
+
+export async function settleLabelPlan(currentLabels, plan, write) {
+  let labels = currentLabels.slice();
+  let error = null;
+  const add = (name) => {
+    if (!labels.includes(name)) labels.push(name);
+  };
+  const remove = (name) => {
+    labels = labels.filter((item) => item !== name);
+  };
+  try {
+    if (plan.add.length > 0) {
+      await write({ op: "add", name: plan.label });
+      add(plan.label);
+    }
+    for (const name of plan.remove) {
+      if (!labels.includes(name)) continue;
+      await write({ op: "remove", name });
+      remove(name);
+    }
+  } catch (caught) {
+    error = caught;
+  }
+  if (error) {
+    const stale = labels.filter((name) => isRiskLabel(name) && name !== plan.label);
+    for (const name of stale) {
+      try {
+        await write({ op: "remove", name });
+        remove(name);
+      } catch (cleanupError) {
+        if (cleanupError && cleanupError.status === 404) remove(name);
+      }
+    }
+  }
+  const risk = labels.filter(isRiskLabel);
+  return { labels, error, conflict: risk.length > 1, risk };
 }
 
 export function applyLabelPlan(currentLabels, plan) {
@@ -259,8 +355,9 @@ async function ensureLabel(token, owner, repo, spec) {
   }
 }
 
-async function listChangedPaths(token, owner, repo, number) {
+async function listPullRequestFiles(token, owner, repo, number) {
   const files = [];
+  let capHit = false;
   for (let page = 1; ; page += 1) {
     const batch = await github(
       token,
@@ -268,10 +365,20 @@ async function listChangedPaths(token, owner, repo, number) {
       `/repos/${owner}/${repo}/pulls/${number}/files?per_page=100&page=${page}`,
     );
     if (!Array.isArray(batch) || batch.length === 0) break;
+    const room = FILES_API_CAP - files.length;
+    if (batch.length > room) {
+      files.push(...batch.slice(0, room));
+      capHit = true;
+      break;
+    }
     files.push(...batch);
+    if (files.length >= FILES_API_CAP) {
+      capHit = true;
+      break;
+    }
     if (batch.length < 100) break;
   }
-  return changedPaths(files);
+  return { files, capHit };
 }
 
 async function listIssueLabels(token, owner, repo, number) {
@@ -290,21 +397,38 @@ async function listIssueLabels(token, owner, repo, number) {
 }
 
 async function syncLabel(token, owner, repo, number, tier) {
-  for (const spec of LABEL_SPECS) {
-    await ensureLabel(token, owner, repo, spec);
-  }
   const current = await listIssueLabels(token, owner, repo, number);
   const plan = planLabelUpdates(current, tier);
-  for (const name of plan.remove) {
-    const encoded = encodeURIComponent(name);
-    try {
-      await github(token, "DELETE", `/repos/${owner}/${repo}/issues/${number}/labels/${encoded}`);
-    } catch (error) {
-      if (error.status !== 404) throw error;
+  try {
+    for (const spec of LABEL_SPECS) {
+      await ensureLabel(token, owner, repo, spec);
     }
+  } catch (error) {
+    error.conflict = current.filter(isRiskLabel).length > 1;
+    throw error;
   }
-  if (plan.add.length > 0) {
-    await github(token, "POST", `/repos/${owner}/${repo}/issues/${number}/labels`, { labels: plan.add });
+  const write = async (action) => {
+    if (action.op === "remove") {
+      const encoded = encodeURIComponent(action.name);
+      try {
+        await github(token, "DELETE", `/repos/${owner}/${repo}/issues/${number}/labels/${encoded}`);
+      } catch (error) {
+        if (error.status !== 404) throw error;
+      }
+      return;
+    }
+    if (action.op === "add") {
+      await github(token, "POST", `/repos/${owner}/${repo}/issues/${number}/labels`, {
+        labels: [action.name],
+      });
+      return;
+    }
+    throw new Error(`Unknown label op: ${action.op}`);
+  };
+  const settled = await settleLabelPlan(current, plan, write);
+  if (settled.error) {
+    settled.error.conflict = settled.conflict;
+    throw settled.error;
   }
   return plan;
 }
@@ -325,11 +449,30 @@ async function main() {
   const [owner, repo] = repository.split("/");
   const event = readEvent();
   const number = event.pull_request.number;
-  const rules = loadTiersFile();
-  const paths = await listChangedPaths(token, owner, repo, number);
-  const computed = computeTier(paths, rules);
+  let rules = [];
+  let tiersFailure = null;
+  try {
+    rules = loadTiersFile();
+  } catch (error) {
+    tiersFailure = `risk-tiers is invalid. The tier fails closed to high. ${error.message}`;
+    console.log(tiersFailure);
+  }
+  let paths = [];
+  let listFailure = null;
+  try {
+    const listed = await listPullRequestFiles(token, owner, repo, number);
+    paths = changedPaths(listed.files);
+    listFailure = changedFilesFailure(listed.files.length, event.pull_request.changed_files, listed.capHit);
+    if (listFailure) console.log(listFailure);
+  } catch (error) {
+    listFailure = `The files API could not be read. The tier fails closed to high. ${error.message}`;
+    console.log(listFailure);
+  }
+  const unsafeFailure = unsafePathReason(paths);
+  if (unsafeFailure) console.log(unsafeFailure);
+  const computed = decideTier({ tiersFailure, listFailure, unsafeFailure, paths, rules });
   for (const filePath of paths) {
-    console.log(`${tierForPath(filePath, rules)} ${filePath}`);
+    console.log(`${unsafeFailure ? "high" : tierForPath(filePath, rules)} ${filePath}`);
   }
   console.log(`computed ${computed}`);
   const claimed = parseClaimedTier(event.pull_request.body);
@@ -342,7 +485,7 @@ async function main() {
   } catch (error) {
     labelError = error;
   }
-  const gate = finishGate({ labelError, failure });
+  const gate = finishGate({ labelError, failure, conflict: Boolean(labelError && labelError.conflict) });
   if (gate.rethrow) throw labelError;
   if (plan) {
     console.log(`risk label: ${plan.label}`);
@@ -352,14 +495,16 @@ async function main() {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
     const label = plan ? plan.label : labelForTier(computed);
-    const note = gate.warning ? `\n\n${gate.warning}` : "";
+    const note = [gate.warning, tiersFailure, listFailure, unsafeFailure].filter(Boolean).join("\n\n");
+    const extra = note ? `\n\n${note}` : "";
     fs.appendFileSync(
       summaryPath,
-      `Risk label: \`${label}\`\n\nComputed from the changed paths. The pull request body does not set this tier.${note}\n`,
+      `Risk label: \`${label}\`\n\nComputed from the changed paths. The pull request body does not set this tier.${extra}\n`,
     );
   }
   if (gate.exitCode !== 0) {
-    console.error(failure);
+    if (failure) console.error(failure);
+    if (gate.conflictFailure) console.error(gate.conflictFailure);
     process.exitCode = gate.exitCode;
   }
 }
