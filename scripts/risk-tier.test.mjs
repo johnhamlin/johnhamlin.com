@@ -190,15 +190,41 @@ test("a 403 on the label write still runs the body check", () => {
   assert.equal(other.rethrow, true);
 });
 
+function extractJob(workflow, name) {
+  const match = new RegExp(`\\n  ${name}:\\n`).exec(workflow);
+  assert.ok(match, name);
+  const start = match.index + 1;
+  const rest = workflow.slice(start);
+  const next = rest.slice(1).search(/\n  [a-z]/);
+  return next === -1 ? rest : rest.slice(0, next + 1);
+}
+
 test("the workflow runs the base script and fails closed when it is missing", () => {
   const workflow = fs.readFileSync(path.join(repoRoot(), ".github/workflows/risk-tier.yml"), "utf8");
-  assert.match(workflow, /github\.event\.pull_request\.base\.sha/);
-  assert.match(workflow, /node base\/scripts\/risk-tier\.mjs/);
-  assert.equal(workflow.match(/persist-credentials:\s*false/g).length, 2);
+  const tier = extractJob(workflow, "tier");
+  const testJob = extractJob(workflow, "test");
   assert.match(workflow, /on:\n {2}pull_request:\n/);
   assert.doesNotMatch(workflow, /on:\n {2}pull_request_target:/);
-  assert.match(workflow, /computed high/);
-  assert.match(workflow, /base has no scripts\/risk-tier\.mjs/);
+  assert.match(tier, /github\.event\.pull_request\.base\.sha/);
+  assert.match(tier, /node scripts\/risk-tier\.mjs/);
+  assert.match(tier, /persist-credentials:\s*false/);
+  assert.match(tier, /computed high/);
+  assert.match(tier, /base has no scripts\/risk-tier\.mjs/);
+  assert.match(testJob, /permissions:\s*\{\s*\}/);
+  assert.match(testJob, /npm test/);
+  assert.doesNotMatch(testJob, /pull_request\.base\.sha/);
+  assert.doesNotMatch(testJob, /secrets\.GITHUB_TOKEN/);
+
+  const steps = tier.split(/\n {6}- /).slice(1);
+  const baseAt = steps.findIndex((step) => step.includes("pull_request.base.sha"));
+  assert.ok(baseAt >= 0, "tier job checks out the base");
+  const after = steps.slice(baseAt + 1);
+  assert.ok(after.length > 0);
+  for (const step of after) {
+    assert.doesNotMatch(step, /\bnpm\b/, step.slice(0, 80));
+    assert.doesNotMatch(step, /risk-tier\.test\.mjs/);
+    assert.doesNotMatch(step, /node-version-file:/);
+  }
 });
 
 test("CODEOWNERS lists johnhamlin on every high glob", () => {
