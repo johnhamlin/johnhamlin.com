@@ -1,6 +1,8 @@
 name: Risk tier
 
-# pull_request, not pull_request_target. The check script from this branch runs.
+# pull_request, not pull_request_target.
+# The script and risk-tiers come from the base commit. If that commit has no
+# script, fail closed: the tier is high and the high box is required.
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
@@ -19,8 +21,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout
+      - name: Checkout pull request
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -30,7 +41,116 @@ jobs:
       - name: Test risk tier
         run: npm test
 
-      - name: Set risk label
+      - name: Note whether the base has the check script
+        id: base-script
+        run: |
+          if [ -f base/scripts/risk-tier.mjs ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set risk label from the base script
+        if: steps.base-script.outputs.present == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/risk-tier.mjs
+        run: node base/scripts/risk-tier.mjs
+
+      - name: Fail closed when the base has no check script
+        if: steps.base-script.outputs.present != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BOOTSTRAP_SOURCE: |
+            import fs from "node:fs";
+
+            const token = process.env.GITHUB_TOKEN;
+            const repository = process.env.GITHUB_REPOSITORY;
+            if (!token) throw new Error("GITHUB_TOKEN is not set");
+            if (!repository || !repository.includes("/")) throw new Error("GITHUB_REPOSITORY must be owner/name");
+            const [owner, repo] = repository.split("/");
+            const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+            const number = event.pull_request.number;
+            const body = String(event.pull_request.body ?? "");
+            const checked = [];
+            for (const line of body.split(/\r?\n/)) {
+              const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)\b/);
+              if (match && (match[1] === "x" || match[1] === "X")) checked.push(match[2]);
+            }
+            console.log("bootstrap: base has no scripts/risk-tier.mjs");
+            console.log("computed high");
+            console.log("claimed " + (checked.length === 1 ? checked[0] : "none"));
+            let failure = null;
+            if (checked.length === 0) failure = "No risk tier is checked in the pull request body.";
+            else if (checked.length > 1) failure = "The pull request body checks more than one risk tier.";
+            else if (checked[0] !== "high") failure = "Claimed risk tier " + checked[0] + " is lower than computed tier high.";
+
+            const headers = {
+              Accept: "application/vnd.github+json",
+              Authorization: "Bearer " + token,
+              "Content-Type": "application/json",
+              "User-Agent": "johnhamlin-com-risk-tier",
+              "X-GitHub-Api-Version": "2022-11-28",
+            };
+            async function github(method, apiPath, payload) {
+              const response = await fetch("https://api.github.com" + apiPath, {
+                method,
+                headers,
+                body: payload ? JSON.stringify(payload) : undefined,
+              });
+              const text = await response.text();
+              let parsed = null;
+              if (text) {
+                try {
+                  parsed = JSON.parse(text);
+                } catch {
+                  parsed = text;
+                }
+              }
+              if (!response.ok) {
+                const detail = parsed && parsed.message ? parsed.message : text;
+                const error = new Error(method + " " + apiPath + " failed (" + response.status + "): " + detail);
+                error.status = response.status;
+                throw error;
+              }
+              return parsed;
+            }
+            try {
+              const spec = { name: "risk:high", color: "b60205", description: "Computed path risk tier is high." };
+              const encoded = encodeURIComponent(spec.name);
+              try {
+                await github("GET", "/repos/" + owner + "/" + repo + "/labels/" + encoded);
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                try {
+                  await github("POST", "/repos/" + owner + "/" + repo + "/labels", spec);
+                } catch (error) {
+                  if (error.status !== 422) throw error;
+                }
+              }
+              const current = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
+              const names = Array.isArray(current) ? current.map((label) => label.name) : [];
+              for (const name of names) {
+                if (name !== "risk:high" && (name === "risk:low" || name === "risk:medium")) {
+                  try {
+                    await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
+                  } catch (error) {
+                    if (error.status !== 404) throw error;
+                  }
+                }
+              }
+              if (!names.includes("risk:high")) {
+                await github("POST", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels", { labels: ["risk:high"] });
+              }
+              console.log("risk label: risk:high");
+            } catch (error) {
+              if (error.status !== 403) throw error;
+              console.warn("warning: label write was denied (403). Continuing with the body check. " + error.message);
+            }
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "Risk label: `risk:high`\n\nBase commit has no scripts/risk-tier.mjs. The tier fails closed to high.\n");
+            }
+            if (failure) {
+              console.error(failure);
+              process.exitCode = 1;
+            }
+        run: node --input-type=module -e "$BOOTSTRAP_SOURCE"

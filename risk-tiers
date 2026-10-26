@@ -1,12 +1,13 @@
-# tier glob
+# tier, then the glob. The glob is the rest of the line and may contain spaces.
+# Do not put a comment after the glob.
 # A path that matches nothing is medium.
 # When a path matches more than one glob, the highest tier wins.
 # low < medium < high
 # These paths are also hardcoded as high in scripts/risk-tier.mjs.
 
-high AGENTS.md
-high CLAUDE.md
-high REVIEW.md
+high **/AGENTS.md
+high **/CLAUDE.md
+high **/REVIEW.md
 high .cursor/**
 high .claude/**
 high .github/**

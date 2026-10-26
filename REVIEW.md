@@ -31,11 +31,13 @@ What failure looks like here: a post leaks a draft or the unredacted résumé, c
 
 ## Risk tiers by path
 
-The risk tier is set by the change, not the author. The `risk:low`, `risk:medium`, or `risk:high` label is the source of truth. `.github/workflows/risk-tier.yml` computes that label from the changed paths. `risk-tiers` maps globs to low, medium, or high. A path that matches nothing is medium. When a path matches more than one glob, the highest tier wins. The pull request body does not set the tier. The check fails when no box is checked, or when the checked tier is lower than the computed tier.
+The risk tier is set by the change, not the author. The `risk:low`, `risk:medium`, or `risk:high` label is the source of truth when the workflow can write it. The pull request body does not set the tier. The check fails when no box is checked, or when the checked tier is lower than the computed tier. A path that matches nothing is medium. When a path matches more than one glob, the highest tier wins. In `risk-tiers`, the glob is the rest of the line and may contain spaces.
+
+`.github/workflows/risk-tier.yml` checks out `github.event.pull_request.base.sha` and runs `scripts/risk-tier.mjs` and `risk-tiers` from that commit, against this pull request's changed files. A pull request that edits the script or `risk-tiers` does not change the copy that runs. A diff that touches `scripts/risk-tier.mjs` is high. If the base commit has no `scripts/risk-tier.mjs`, the workflow does not run the pull request's script. It fails closed: the tier is high, and the high box is required. A label write that returns 403, which is what a fork pull request gets, is a warning. The body check still runs. This is a `pull_request` workflow, not `pull_request_target`. The workflow file GitHub runs is the one on the merge commit.
 
 Use the highest tier the diff touches. Scale that tier by blast radius and by how easy a rollback is. A revert of one content file is easier than a config change that affects every request.
 
-These paths are always high, including when `risk-tiers` says otherwise: `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, `.cursor/**`, `.claude/**`, `.github/**` (the pull request template and the workflows), `risk-tiers`, `scripts/risk-tier.mjs`, and `scripts/risk-tier.test.mjs`. `.github/CODEOWNERS` lists `@johnhamlin` on every high path.
+These paths are always high, including when `risk-tiers` says otherwise: `**/AGENTS.md`, `**/CLAUDE.md`, `**/REVIEW.md`, `.cursor/**`, `.claude/**`, `.github/**` (the pull request template and the workflows), `risk-tiers`, `scripts/risk-tier.mjs`, and `scripts/risk-tier.test.mjs`. `.github/CODEOWNERS` lists `@johnhamlin` on every high path.
 
 ### High
 
@@ -45,7 +47,7 @@ These paths are always high, including when `risk-tiers` says otherwise: `AGENTS
 - Cloudflare deploy config, redirects, and headers: `wrangler.toml`, `wrangler.json`, `wrangler.jsonc`, `_headers`, `_redirects`, `public/_headers`, and `public/_redirects`. None of those files are in the repo. Adding one is high.
 - `package.json` and `package-lock.json`. A dependency upgrade is not separable from other edits by path.
 - Anything that could leak drafts or env: `.env`, `.env.*`, and unpublished posts under `src/content/drafts/**`
-- Agent instruction files: `REVIEW.md`, `AGENTS.md`, `CLAUDE.md`, `.cursor/**`, and `.claude/**`. They steer every future agent, so a wrong line causes real damage.
+- Agent instruction files at any depth: `**/REVIEW.md`, `**/AGENTS.md`, `**/CLAUDE.md`, `.cursor/**`, and `.claude/**`. They steer every future agent, so a wrong line causes real damage.
 - `risk-tiers`, `scripts/risk-tier.mjs`, and `scripts/risk-tier.test.mjs`
 
 ### Medium

@@ -1,8 +1,8 @@
 # High paths from /risk-tiers. @johnhamlin owns each one.
 
-/AGENTS.md @johnhamlin
-/CLAUDE.md @johnhamlin
-/REVIEW.md @johnhamlin
+**/AGENTS.md @johnhamlin
+**/CLAUDE.md @johnhamlin
+**/REVIEW.md @johnhamlin
 /.cursor/** @johnhamlin
 /.claude/** @johnhamlin
 /.github/** @johnhamlin

@@ -24,10 +24,11 @@ const LABEL_SPECS = [
 ];
 
 // Floor. A pull request cannot downgrade these by editing risk-tiers.
+// AGENTS.md, CLAUDE.md, and REVIEW.md match at any depth.
 export const ALWAYS_HIGH = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  "REVIEW.md",
+  "**/AGENTS.md",
+  "**/CLAUDE.md",
+  "**/REVIEW.md",
   ".cursor/**",
   ".claude/**",
   ".github/**",
@@ -78,7 +79,8 @@ export function globToRegExp(glob) {
     }
     index += 1;
   }
-  return new RegExp(`^${source}$`);
+  // `s` makes `**` (`.*`) match a newline inside a path.
+  return new RegExp(`^${source}$`, glob.includes("**") ? "s" : undefined);
 }
 
 export function normalizePath(filePath) {
@@ -91,14 +93,15 @@ export function loadTiers(text) {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].trim();
     if (!line || line.startsWith("#")) continue;
-    const match = line.match(/^(low|medium|high)\s+(\S+)$/);
+    const match = line.match(/^(low|medium|high)\s+(\S.*)$/);
     if (!match) {
       throw new Error(`risk-tiers:${index + 1}: expected "tier glob"`);
     }
+    const glob = match[2].trim();
     rules.push({
       tier: match[1],
-      glob: match[2],
-      regex: globToRegExp(match[2]),
+      glob,
+      regex: globToRegExp(glob),
     });
   }
   return rules;
@@ -179,6 +182,17 @@ export function planLabelUpdates(currentLabels, tier) {
   );
   const add = currentLabels.includes(label) ? [] : [label];
   return { label, add, remove };
+}
+
+export function finishGate({ labelError, failure }) {
+  const denied = Boolean(labelError && labelError.status === 403);
+  if (labelError && !denied) {
+    return { rethrow: true, exitCode: 1, warning: null };
+  }
+  const warning = denied
+    ? `warning: label write was denied (403). Continuing with the body check. ${labelError.message}`
+    : null;
+  return { rethrow: false, exitCode: failure ? 1 : 0, warning };
 }
 
 export function applyLabelPlan(currentLabels, plan) {
@@ -316,19 +330,32 @@ async function main() {
   const claimed = parseClaimedTier(event.pull_request.body);
   console.log(`claimed ${claimed.ok ? claimed.tier : "none"}`);
   const failure = claimed.ok ? claimFailure(claimed.tier, computed) : claimed.message;
-  const plan = await syncLabel(token, owner, repo, number, computed);
-  console.log(`risk label: ${plan.label}`);
-  if (plan.remove.length > 0) console.log(`removed ${plan.remove.join(", ")}`);
+  let plan = null;
+  let labelError = null;
+  try {
+    plan = await syncLabel(token, owner, repo, number, computed);
+  } catch (error) {
+    labelError = error;
+  }
+  const gate = finishGate({ labelError, failure });
+  if (gate.rethrow) throw labelError;
+  if (plan) {
+    console.log(`risk label: ${plan.label}`);
+    if (plan.remove.length > 0) console.log(`removed ${plan.remove.join(", ")}`);
+  }
+  if (gate.warning) console.warn(gate.warning);
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
+    const label = plan ? plan.label : labelForTier(computed);
+    const note = gate.warning ? `\n\n${gate.warning}` : "";
     fs.appendFileSync(
       summaryPath,
-      `Risk label: \`${plan.label}\`\n\nComputed from the changed paths. The pull request body does not set this tier.\n`,
+      `Risk label: \`${label}\`\n\nComputed from the changed paths. The pull request body does not set this tier.${note}\n`,
     );
   }
-  if (failure) {
+  if (gate.exitCode !== 0) {
     console.error(failure);
-    process.exitCode = 1;
+    process.exitCode = gate.exitCode;
   }
 }
 
