@@ -23,7 +23,6 @@ const LABEL_SPECS = [
   { name: "risk:high", color: "b60205", description: "Computed path risk tier is high." },
 ];
 
-const CASE_INSENSITIVE_NAMES = new Set(["agents.md", "claude.md", "review.md"]);
 const RISK_LABELS = new Set(["risk:low", "risk:medium", "risk:high"]);
 
 // Floor. A pull request cannot downgrade these by editing risk-tiers.
@@ -45,7 +44,7 @@ const ALWAYS_HIGH_RULES = ALWAYS_HIGH.map((glob) => ({
   regex: globToRegExp(glob),
 }));
 
-const CHECKBOX = /^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?=\s|$)/;
+const CHECKBOX = /^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?![\w-])/;
 
 export const FILES_API_CAP = 3000;
 
@@ -58,10 +57,11 @@ export function defaultTiersPath() {
 }
 
 export function globToRegExp(glob) {
+  const pattern = glob.toLowerCase();
   let source = "";
   let index = 0;
-  while (index < glob.length) {
-    const rest = glob.slice(index);
+  while (index < pattern.length) {
+    const rest = pattern.slice(index);
     if (rest.startsWith("**/")) {
       source += "(?:.*/)?";
       index += 3;
@@ -72,7 +72,7 @@ export function globToRegExp(glob) {
       index += 2;
       continue;
     }
-    const character = glob[index];
+    const character = pattern[index];
     if (character === "*") {
       source += "[^/]*";
     } else if (character === "?") {
@@ -85,16 +85,13 @@ export function globToRegExp(glob) {
     index += 1;
   }
   // `s` makes `**` (`.*`) match a newline inside a path.
-  // AGENTS.md, CLAUDE.md, and REVIEW.md match in any case. Other globs do not.
-  return new RegExp(`^${source}$`, regexFlags(glob));
+  // Globs are lowercased here. Callers lowercase the path once before testing.
+  return new RegExp(`^${source}$`, regexFlags(pattern));
 }
 
 function regexFlags(glob) {
-  let flags = "";
-  if (glob.includes("**")) flags += "s";
-  const base = glob.slice(glob.lastIndexOf("/") + 1).toLowerCase();
-  if (CASE_INSENSITIVE_NAMES.has(base)) flags += "i";
-  return flags === "" ? undefined : flags;
+  if (glob.includes("**")) return "s";
+  return undefined;
 }
 
 export function unsafePathReason(filePaths) {
@@ -141,7 +138,7 @@ function higherTier(left, right) {
 
 export function tierForPath(filePath, rules) {
   if (unsafePathReason([filePath])) return "high";
-  const literal = String(filePath);
+  const literal = String(filePath).toLowerCase();
   let best = null;
   for (const rule of rules) {
     if (rule.regex.test(literal)) best = higherTier(best, rule.tier);
@@ -150,6 +147,11 @@ export function tierForPath(filePath, rules) {
     if (rule.regex.test(literal)) best = "high";
   }
   return best ?? "medium";
+}
+
+export function tierForLogLine(filePath, rules, forcedHigh) {
+  if (forcedHigh) return "high";
+  return tierForPath(filePath, rules);
 }
 
 export function computeTier(filePaths, rules) {
@@ -243,16 +245,27 @@ export function failClosedReason(missing) {
   return `base has no ${missing.join(" and ")}`;
 }
 
-export function finishGate({ labelError, failure, conflict = false }) {
+export function riskLabelProblem(labels, computedTier) {
+  const risk = (labels ?? []).filter((name) => RISK_LABELS.has(name));
+  if (risk.length > 1) return "Label update left more than one risk:* label.";
+  if (risk.length === 0) return null;
+  const tier = risk[0].slice("risk:".length);
+  if (RANK[tier] == null || RANK[computedTier] == null || RANK[tier] < RANK[computedTier]) {
+    return `Risk label ${risk[0]} is lower than computed tier ${computedTier}.`;
+  }
+  return null;
+}
+
+export function finishGate({ labelError, failure, labelProblem = null }) {
   const denied = Boolean(labelError && labelError.status === 403);
   if (labelError && !denied) {
-    return { rethrow: true, exitCode: 1, warning: null, conflictFailure: null };
+    return { rethrow: true, exitCode: 1, warning: null, labelProblem: null };
   }
   const warning = denied
     ? `warning: label write was denied (403). Continuing with the body check. ${labelError.message}`
     : null;
-  const conflictFailure = conflict ? "Label update left more than one risk:* label." : null;
-  return { rethrow: false, exitCode: failure || conflictFailure ? 1 : 0, warning, conflictFailure };
+  const problem = labelProblem || null;
+  return { rethrow: false, exitCode: failure || problem ? 1 : 0, warning, labelProblem: problem };
 }
 
 function isRiskLabel(name) {
@@ -397,16 +410,14 @@ async function listIssueLabels(token, owner, repo, number) {
 }
 
 async function syncLabel(token, owner, repo, number, tier) {
-  const current = await listIssueLabels(token, owner, repo, number);
-  const plan = planLabelUpdates(current, tier);
+  let current = [];
+  let settledError = null;
   try {
-    for (const spec of LABEL_SPECS) {
-      await ensureLabel(token, owner, repo, spec);
-    }
+    current = await listIssueLabels(token, owner, repo, number);
   } catch (error) {
-    error.conflict = current.filter(isRiskLabel).length > 1;
-    throw error;
+    settledError = error;
   }
+  const plan = planLabelUpdates(current, tier);
   const write = async (action) => {
     if (action.op === "remove") {
       const encoded = encodeURIComponent(action.name);
@@ -425,10 +436,37 @@ async function syncLabel(token, owner, repo, number, tier) {
     }
     throw new Error(`Unknown label op: ${action.op}`);
   };
-  const settled = await settleLabelPlan(current, plan, write);
+  let settled = {
+    labels: current.slice(),
+    error: settledError,
+    conflict: current.filter(isRiskLabel).length > 1,
+    risk: current.filter(isRiskLabel),
+  };
+  if (!settledError) {
+    try {
+      for (const spec of LABEL_SPECS) {
+        await ensureLabel(token, owner, repo, spec);
+      }
+      settled = await settleLabelPlan(current, plan, write);
+    } catch (error) {
+      settled = { ...settled, error };
+    }
+  }
+  let observed = settled.labels;
+  try {
+    observed = await listIssueLabels(token, owner, repo, number);
+  } catch (error) {
+    if (!settled.error) settled.error = error;
+  }
+  const labelProblem = riskLabelProblem(observed, tier);
   if (settled.error) {
-    settled.error.conflict = settled.conflict;
+    settled.error.labelProblem = labelProblem;
     throw settled.error;
+  }
+  if (labelProblem) {
+    const error = new Error(labelProblem);
+    error.labelProblem = labelProblem;
+    throw error;
   }
   return plan;
 }
@@ -471,8 +509,9 @@ async function main() {
   const unsafeFailure = unsafePathReason(paths);
   if (unsafeFailure) console.log(unsafeFailure);
   const computed = decideTier({ tiersFailure, listFailure, unsafeFailure, paths, rules });
+  const forcedHigh = Boolean(tiersFailure || listFailure || unsafeFailure);
   for (const filePath of paths) {
-    console.log(`${unsafeFailure ? "high" : tierForPath(filePath, rules)} ${filePath}`);
+    console.log(`${tierForLogLine(filePath, rules, forcedHigh)} ${filePath}`);
   }
   console.log(`computed ${computed}`);
   const claimed = parseClaimedTier(event.pull_request.body);
@@ -485,7 +524,11 @@ async function main() {
   } catch (error) {
     labelError = error;
   }
-  const gate = finishGate({ labelError, failure, conflict: Boolean(labelError && labelError.conflict) });
+  const gate = finishGate({
+    labelError,
+    failure,
+    labelProblem: labelError ? labelError.labelProblem : null,
+  });
   if (gate.rethrow) throw labelError;
   if (plan) {
     console.log(`risk label: ${plan.label}`);
@@ -504,7 +547,7 @@ async function main() {
   }
   if (gate.exitCode !== 0) {
     if (failure) console.error(failure);
-    if (gate.conflictFailure) console.error(gate.conflictFailure);
+    if (gate.labelProblem) console.error(gate.labelProblem);
     process.exitCode = gate.exitCode;
   }
 }

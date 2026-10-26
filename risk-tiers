@@ -4,6 +4,7 @@
 # When a path matches more than one glob, the highest tier wins.
 # low < medium < high
 # These paths are also hardcoded as high in scripts/risk-tier.mjs.
+# The path is lowercased once before rules run, so every glob is case-insensitive.
 
 high **/AGENTS.md
 high **/CLAUDE.md

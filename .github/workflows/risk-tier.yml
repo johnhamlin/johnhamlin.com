@@ -95,7 +95,7 @@ jobs:
               }
               const checked = [];
               for (const line of section.split(/\r?\n/)) {
-                const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?=\s|$)/);
+                const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?![\w-])/);
                 if (match && (match[1] === "x" || match[1] === "X")) checked.push(match[2]);
               }
               return checked;
@@ -217,6 +217,8 @@ jobs:
             let names = [];
             let labelError = null;
             try {
+              const current = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
+              names = Array.isArray(current) ? current.map((label) => label.name) : [];
               const spec = { name: "risk:high", color: "b60205", description: "Computed path risk tier is high." };
               const encoded = encodeURIComponent(spec.name);
               try {
@@ -229,8 +231,6 @@ jobs:
                   if (error.status !== 422) throw error;
                 }
               }
-              const current = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
-              names = Array.isArray(current) ? current.map((label) => label.name) : [];
               if (!names.includes("risk:high")) {
                 await github("POST", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels", { labels: ["risk:high"] });
                 names.push("risk:high");
@@ -244,7 +244,6 @@ jobs:
                 }
                 names = names.filter((item) => item !== name);
               }
-              console.log("risk label: risk:high");
             } catch (error) {
               labelError = error;
               for (const name of ["risk:low", "risk:medium"]) {
@@ -259,10 +258,26 @@ jobs:
               if (error.status !== 403) throw error;
               console.warn("warning: label write was denied (403). Continuing with the body check. " + error.message);
             }
+            try {
+              const again = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
+              names = Array.isArray(again) ? again.map((label) => label.name) : [];
+            } catch (error) {
+              if (!labelError) labelError = error;
+              if (error.status !== 403) throw error;
+              console.warn("warning: could not re-read labels after the label write. " + error.message);
+            }
             const riskNames = names.filter((name) => name === "risk:low" || name === "risk:medium" || name === "risk:high");
-            if (riskNames.length > 1) {
-              console.error("Label update left more than one risk:* label.");
+            const rank = { low: 0, medium: 1, high: 2 };
+            let labelProblem = null;
+            if (riskNames.length > 1) labelProblem = "Label update left more than one risk:* label.";
+            else if (riskNames.length === 1 && rank[riskNames[0].slice("risk:".length)] < rank.high) {
+              labelProblem = "Risk label " + riskNames[0] + " is lower than computed tier high.";
+            }
+            if (labelProblem) {
+              console.error(labelProblem);
               process.exitCode = 1;
+            } else if (names.includes("risk:high")) {
+              console.log("risk label: risk:high");
             }
             if (process.env.GITHUB_STEP_SUMMARY) {
               fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "Risk label: `risk:high`\n\n" + reason + ". The tier fails closed to high.\n");
