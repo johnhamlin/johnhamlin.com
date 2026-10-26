@@ -410,7 +410,7 @@ test("a 403 midway through a label update never passes with two risk labels", as
   });
   assert.equal(fork.conflict, false);
   assert.deepEqual(fork.risk, []);
-  assert.equal(riskLabelProblem(fork.risk, "high"), null);
+  assert.equal(riskLabelProblem(fork.risk, "high", { writeSucceeded: false, writeDenied: true }), null);
   assert.equal(finishGate({ labelError: fork.error, failure: null, labelProblem: null }).exitCode, 0);
 });
 
@@ -432,7 +432,7 @@ test("a refused add that leaves risk:low fails when the tier is higher", async (
   assert.equal(gate.exitCode, 1);
   assert.match(gate.warning, /403/);
   assert.doesNotMatch(gate.warning, /Continuing with the body check/);
-  assert.equal(riskLabelProblem([], "high"), null);
+  assert.match(riskLabelProblem([], "high"), /The pull request has no risk:\* label/);
   assert.equal(riskLabelProblem(["risk:high"], "high"), null);
   assert.match(riskLabelProblem(["risk:high"], "medium"), /higher than computed tier medium/);
   assert.match(riskLabelProblem(["risk:medium"], "high"), /lower than computed tier high/);
@@ -450,8 +450,8 @@ test("zero labels after a successful write fails", async () => {
   const empty = { writeSucceeded: true };
   const problem = riskLabelProblem([], "high", empty);
   assert.match(problem, /A label write succeeded but the pull request has no risk:\* label\./);
-  assert.equal(riskLabelProblem([], "high"), null);
-  assert.equal(riskLabelProblem([], "high", { writeSucceeded: false }), null);
+  assert.match(riskLabelProblem([], "high"), /The pull request has no risk:\* label/);
+  assert.match(riskLabelProblem([], "high", { writeSucceeded: false }), /The pull request has no risk:\* label/);
   const denied = Object.assign(new Error("Resource not accessible by integration"), { status: 403 });
   const failed = finishGate({ labelError: denied, failure: null, labelProblem: problem });
   assert.equal(failed.rethrow, false);
@@ -461,13 +461,14 @@ test("zero labels after a successful write fails", async () => {
   const warned = finishGate({
     labelError: denied,
     failure: null,
-    labelProblem: riskLabelProblem([], "high", { writeSucceeded: false }),
+    labelProblem: riskLabelProblem([], "high", { writeSucceeded: false, writeDenied: true }),
   });
   assert.equal(warned.exitCode, 0);
 
   const { outcomeAfterLabelWrite, applyRiskLabel } = bootstrapLabelApi();
   assert.equal(outcomeAfterLabelWrite([], "high", empty), problem);
-  assert.equal(outcomeAfterLabelWrite([], "high", { writeSucceeded: false }), null);
+  assert.match(outcomeAfterLabelWrite([], "high", { writeSucceeded: false }), /The pull request has no risk:\* label/);
+  assert.equal(outcomeAfterLabelWrite([], "high", { writeSucceeded: false, writeDenied: true }), null);
   let issueReads = 0;
   const applied = await applyRiskLabel(async (method, apiPath) => {
     if (method === "GET" && apiPath.includes("/issues/")) {
@@ -480,6 +481,60 @@ test("zero labels after a successful write fails", async () => {
     throw new Error(`unexpected ${method} ${apiPath}`);
   }, "o", "r", 1);
   assert.equal(applied.writeSucceeded, true);
+  assert.equal(applied.readError, null);
+  assert.equal(applied.labelProblem, problem);
+});
+
+test("a re-read with zero labels fails when nothing was written", () => {
+  const problem = riskLabelProblem([], "high", { writeSucceeded: false });
+  assert.equal(problem, "The pull request has no risk:* label.");
+  assert.equal(riskLabelProblem([], "high"), problem);
+  assert.equal(riskLabelProblem([], "medium", { writeSucceeded: false, writeDenied: true }), null);
+  const gate = finishGate({ labelError: null, failure: null, labelProblem: problem });
+  assert.equal(gate.rethrow, false);
+  assert.equal(gate.exitCode, 1);
+  assert.equal(gate.warning, null);
+  const { outcomeAfterLabelWrite } = bootstrapLabelApi();
+  assert.equal(outcomeAfterLabelWrite([], "high", { writeSucceeded: false }), problem);
+  assert.equal(outcomeAfterLabelWrite([], "low", { writeSucceeded: false, writeDenied: true }), null);
+  const script = fs.readFileSync(path.join(repoRoot(), "scripts/risk-tier.mjs"), "utf8");
+  const mainSource = script.slice(script.indexOf("async function main"));
+  assert.match(mainSource, /labelProblem = plan\.labelProblem/);
+  assert.match(mainSource, /labelProblem,/);
+  assert.doesNotMatch(mainSource, /labelError \? labelError\.labelProblem : null/);
+});
+
+test("a re-read that drops the correct label fails when nothing was written", async () => {
+  const starting = ["risk:high"];
+  const plan = planLabelUpdates(starting, "high");
+  assert.deepEqual(plan.add, []);
+  assert.deepEqual(plan.remove, []);
+  let writes = 0;
+  const settled = await settleLabelPlan(starting, plan, async () => {
+    writes += 1;
+  });
+  assert.equal(writes, 0);
+  assert.equal(settled.writeSucceeded, false);
+  const problem = riskLabelProblem([], "high", { writeSucceeded: settled.writeSucceeded });
+  assert.equal(problem, "The pull request has no risk:* label.");
+  const gate = finishGate({ labelError: null, failure: null, labelProblem: problem });
+  assert.equal(gate.exitCode, 1);
+  assert.equal(gate.rethrow, false);
+
+  const { outcomeAfterLabelWrite, applyRiskLabel } = bootstrapLabelApi();
+  assert.equal(outcomeAfterLabelWrite([], "high", { writeSucceeded: false }), problem);
+  let reads = 0;
+  const applied = await applyRiskLabel(async (method, apiPath) => {
+    if (method === "GET" && apiPath.includes("/issues/")) {
+      reads += 1;
+      return reads === 1 ? [{ name: "risk:high" }] : [];
+    }
+    if (method === "GET" && apiPath.includes("/labels/")) return { name: "risk:high" };
+    throw new Error(`unexpected ${method} ${apiPath}`);
+  }, "o", "r", 1);
+  assert.equal(reads, 2);
+  assert.equal(applied.writeSucceeded, false);
+  assert.equal(applied.labelError, null);
   assert.equal(applied.readError, null);
   assert.equal(applied.labelProblem, problem);
 });
@@ -558,7 +613,7 @@ test("a recovery write succeeds and then the re-read gets a 403, which fails", a
   const script = fs.readFileSync(path.join(repoRoot(), "scripts/risk-tier.mjs"), "utf8");
   const syncSource = script.slice(script.indexOf("async function syncLabel"), script.indexOf("function readEvent"));
   assert.match(syncSource, /let writeSucceeded = false/);
-  assert.match(syncSource, /riskLabelProblem\(observed, tier, \{ writeSucceeded, readError \}\)/);
+  assert.match(syncSource, /riskLabelProblem\(observed, tier, \{ writeSucceeded, readError, writeDenied \}\)/);
   assert.ok(syncSource.indexOf("let writeSucceeded = false") < syncSource.indexOf("if (!settled.error) settled.error = error"));
 
   const { outcomeAfterLabelWrite, applyRiskLabel } = bootstrapLabelApi();

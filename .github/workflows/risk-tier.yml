@@ -235,13 +235,17 @@ jobs:
                 return null;
               }
               if (writeSucceeded) return "A label write succeeded but the pull request has no risk:* label.";
-              return null;
+              if (state && state.writeDenied) return null;
+              if (readError) return null;
+              return "The pull request has no risk:* label.";
             }
             // end outcomeAfterLabelWrite
             async function applyRiskLabel(github, owner, repo, number) {
               let names = [];
               let labelError = null;
               let writeSucceeded = false;
+              let writeDenied = false;
+              let mutating = false;
               try {
                 const current = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
                 names = Array.isArray(current) ? current.map((label) => label.name) : [];
@@ -251,26 +255,32 @@ jobs:
                   await github("GET", "/repos/" + owner + "/" + repo + "/labels/" + encoded);
                 } catch (error) {
                   if (error.status !== 404) throw error;
+                  mutating = true;
                   try {
                     await github("POST", "/repos/" + owner + "/" + repo + "/labels", spec);
                     writeSucceeded = true;
                   } catch (error) {
                     if (error.status !== 422) throw error;
                   }
+                  mutating = false;
                 }
                 if (!names.includes("risk:high")) {
+                  mutating = true;
                   await github("POST", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels", { labels: ["risk:high"] });
                   writeSucceeded = true;
                   names.push("risk:high");
+                  mutating = false;
                 }
                 for (const name of ["risk:low", "risk:medium"]) {
                   if (!names.includes(name)) continue;
+                  mutating = true;
                   try {
                     await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
                     writeSucceeded = true;
                   } catch (error) {
                     if (error.status !== 404) throw error;
                   }
+                  mutating = false;
                   names = names.filter((item) => item !== name);
                 }
               } catch (error) {
@@ -286,6 +296,7 @@ jobs:
                   }
                 }
                 if (error.status !== 403) throw error;
+                writeDenied = mutating && !writeSucceeded;
                 console.warn("warning: label write was denied (403). Continuing with the body check. " + error.message);
               }
               let readError = null;
@@ -301,7 +312,7 @@ jobs:
                 }
                 if (!writeSucceeded) console.warn("warning: could not re-read labels after the label write. " + error.message);
               }
-              const labelProblem = outcomeAfterLabelWrite(names, "high", { writeSucceeded: writeSucceeded, readError: readError });
+              const labelProblem = outcomeAfterLabelWrite(names, "high", { writeSucceeded: writeSucceeded, readError: readError, writeDenied: writeDenied });
               return { names: names, labelError: labelError, writeSucceeded: writeSucceeded, readError: readError, labelProblem: labelProblem };
             }
             // end applyRiskLabel

@@ -266,8 +266,11 @@ export function riskLabelProblem(labels, computedTier, options = {}) {
     }
     return null;
   }
+  const writeDenied = Boolean(options && options.writeDenied);
+  if (writeDenied && !writeSucceeded) return null;
+  if (readError) return null;
   if (writeSucceeded) return "A label write succeeded but the pull request has no risk:* label.";
-  return null;
+  return "The pull request has no risk:* label.";
 }
 
 export function finishGate({ labelError, failure, labelProblem = null }) {
@@ -479,6 +482,7 @@ async function syncLabel(token, owner, repo, number, tier) {
     }
   }
   settled.writeSucceeded = writeSucceeded;
+  const writeDenied = Boolean(!settledError && settled.error && settled.error.status === 403 && !writeSucceeded);
   let observed = settled.labels;
   let readError = null;
   try {
@@ -487,18 +491,13 @@ async function syncLabel(token, owner, repo, number, tier) {
     readError = error;
     if (!settled.error) settled.error = error;
   }
-  const labelProblem = riskLabelProblem(observed, tier, { writeSucceeded, readError });
+  const labelProblem = riskLabelProblem(observed, tier, { writeSucceeded, readError, writeDenied });
   if (writeSucceeded && readError && readError.status !== 403 && labelProblem) console.error(labelProblem);
   if (settled.error) {
     settled.error.labelProblem = labelProblem;
     throw settled.error;
   }
-  if (labelProblem) {
-    const error = new Error(labelProblem);
-    error.labelProblem = labelProblem;
-    throw error;
-  }
-  return plan;
+  return { ...plan, labelProblem };
 }
 
 function readEvent() {
@@ -549,18 +548,21 @@ async function main() {
   const failure = claimed.ok ? claimFailure(claimed.tier, computed) : claimed.message;
   let plan = null;
   let labelError = null;
+  let labelProblem = null;
   try {
     plan = await syncLabel(token, owner, repo, number, computed);
+    labelProblem = plan.labelProblem;
   } catch (error) {
     labelError = error;
+    labelProblem = error.labelProblem ?? null;
   }
   const gate = finishGate({
     labelError,
     failure,
-    labelProblem: labelError ? labelError.labelProblem : null,
+    labelProblem,
   });
   if (gate.rethrow) throw labelError;
-  if (plan) {
+  if (plan && !labelProblem) {
     console.log(`risk label: ${plan.label}`);
     if (plan.remove.length > 0) console.log(`removed ${plan.remove.join(", ")}`);
   }
