@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      - run: GITHUB_TOKEN= GIT_TERMINAL_PROMPT=0 PR_NUMBER="${{ github.event.pull_request.number }}" git init . && git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git" && git fetch --depth 1 origin "pull/${PR_NUMBER}/head" && git checkout --detach FETCH_HEAD
+      - run: export GITHUB_TOKEN= GIT_TERMINAL_PROMPT=0 PR_NUMBER="${{ github.event.pull_request.number }}" && git init . && git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git" && git fetch --depth 1 origin "pull/${PR_NUMBER}/head" && git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
