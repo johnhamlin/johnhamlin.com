@@ -214,69 +214,99 @@ jobs:
             } catch (error) {
               console.warn("warning: could not read the changed-file list. The tier stays high. " + error.message);
             }
-            let names = [];
-            let labelError = null;
-            try {
-              const current = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
-              names = Array.isArray(current) ? current.map((label) => label.name) : [];
-              const spec = { name: "risk:high", color: "b60205", description: "Computed path risk tier is high." };
-              const encoded = encodeURIComponent(spec.name);
-              try {
-                await github("GET", "/repos/" + owner + "/" + repo + "/labels/" + encoded);
-              } catch (error) {
-                if (error.status !== 404) throw error;
-                try {
-                  await github("POST", "/repos/" + owner + "/" + repo + "/labels", spec);
-                } catch (error) {
-                  if (error.status !== 422) throw error;
+            function outcomeAfterLabelWrite(labels, computedTier, state) {
+              const writeSucceeded = Boolean(state && state.writeSucceeded);
+              const readError = state && state.readError ? state.readError : null;
+              if (writeSucceeded && readError) return "Could not re-read labels after a successful label write.";
+              const names = Array.isArray(labels) ? labels : [];
+              const unknown = names.filter((name) => name.indexOf("risk:") === 0 && name !== "risk:low" && name !== "risk:medium" && name !== "risk:high");
+              if (unknown.length > 0) return "Risk label " + unknown[0] + " is not a known risk tier.";
+              const riskNames = names.filter((name) => name === "risk:low" || name === "risk:medium" || name === "risk:high");
+              const rank = { low: 0, medium: 1, high: 2 };
+              if (riskNames.length > 1) return "Label update left more than one risk:* label.";
+              if (riskNames.length === 1) {
+                const tier = riskNames[0].slice("risk:".length);
+                if (rank[tier] == null || rank[computedTier] == null || rank[tier] < rank[computedTier]) {
+                  return "Risk label " + riskNames[0] + " is lower than computed tier high.";
                 }
+                return null;
               }
-              if (!names.includes("risk:high")) {
-                await github("POST", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels", { labels: ["risk:high"] });
-                names.push("risk:high");
-              }
-              for (const name of ["risk:low", "risk:medium"]) {
-                if (!names.includes(name)) continue;
+              if (writeSucceeded) return "A label write succeeded but the pull request has no risk:* label.";
+              return null;
+            }
+            // end outcomeAfterLabelWrite
+            async function applyRiskLabel(github, owner, repo, number) {
+              let names = [];
+              let labelError = null;
+              let writeSucceeded = false;
+              try {
+                const current = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
+                names = Array.isArray(current) ? current.map((label) => label.name) : [];
+                const spec = { name: "risk:high", color: "b60205", description: "Computed path risk tier is high." };
+                const encoded = encodeURIComponent(spec.name);
                 try {
-                  await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
+                  await github("GET", "/repos/" + owner + "/" + repo + "/labels/" + encoded);
                 } catch (error) {
                   if (error.status !== 404) throw error;
+                  try {
+                    await github("POST", "/repos/" + owner + "/" + repo + "/labels", spec);
+                    writeSucceeded = true;
+                  } catch (error) {
+                    if (error.status !== 422) throw error;
+                  }
                 }
-                names = names.filter((item) => item !== name);
-              }
-            } catch (error) {
-              labelError = error;
-              for (const name of ["risk:low", "risk:medium"]) {
-                if (!names.includes(name)) continue;
-                try {
-                  await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
+                if (!names.includes("risk:high")) {
+                  await github("POST", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels", { labels: ["risk:high"] });
+                  writeSucceeded = true;
+                  names.push("risk:high");
+                }
+                for (const name of ["risk:low", "risk:medium"]) {
+                  if (!names.includes(name)) continue;
+                  try {
+                    await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
+                    writeSucceeded = true;
+                  } catch (error) {
+                    if (error.status !== 404) throw error;
+                  }
                   names = names.filter((item) => item !== name);
-                } catch (cleanupError) {
-                  if (cleanupError.status === 404) names = names.filter((item) => item !== name);
                 }
+              } catch (error) {
+                labelError = error;
+                for (const name of ["risk:low", "risk:medium"]) {
+                  if (!names.includes(name)) continue;
+                  try {
+                    await github("DELETE", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels/" + encodeURIComponent(name));
+                    writeSucceeded = true;
+                    names = names.filter((item) => item !== name);
+                  } catch (cleanupError) {
+                    if (cleanupError.status === 404) names = names.filter((item) => item !== name);
+                  }
+                }
+                if (error.status !== 403) throw error;
+                console.warn("warning: label write was denied (403). Continuing with the body check. " + error.message);
               }
-              if (error.status !== 403) throw error;
-              console.warn("warning: label write was denied (403). Continuing with the body check. " + error.message);
+              let readError = null;
+              try {
+                const again = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
+                names = Array.isArray(again) ? again.map((label) => label.name) : [];
+              } catch (error) {
+                readError = error;
+                if (!labelError) labelError = error;
+                if (error.status !== 403) {
+                  if (writeSucceeded) console.error("Could not re-read labels after a successful label write.");
+                  throw error;
+                }
+                if (!writeSucceeded) console.warn("warning: could not re-read labels after the label write. " + error.message);
+              }
+              const labelProblem = outcomeAfterLabelWrite(names, "high", { writeSucceeded: writeSucceeded, readError: readError });
+              return { names: names, labelError: labelError, writeSucceeded: writeSucceeded, readError: readError, labelProblem: labelProblem };
             }
-            try {
-              const again = await github("GET", "/repos/" + owner + "/" + repo + "/issues/" + number + "/labels?per_page=100");
-              names = Array.isArray(again) ? again.map((label) => label.name) : [];
-            } catch (error) {
-              if (!labelError) labelError = error;
-              if (error.status !== 403) throw error;
-              console.warn("warning: could not re-read labels after the label write. " + error.message);
-            }
-            const riskNames = names.filter((name) => name === "risk:low" || name === "risk:medium" || name === "risk:high");
-            const rank = { low: 0, medium: 1, high: 2 };
-            let labelProblem = null;
-            if (riskNames.length > 1) labelProblem = "Label update left more than one risk:* label.";
-            else if (riskNames.length === 1 && rank[riskNames[0].slice("risk:".length)] < rank.high) {
-              labelProblem = "Risk label " + riskNames[0] + " is lower than computed tier high.";
-            }
-            if (labelProblem) {
-              console.error(labelProblem);
+            // end applyRiskLabel
+            const applied = await applyRiskLabel(github, owner, repo, number);
+            if (applied.labelProblem) {
+              console.error(applied.labelProblem);
               process.exitCode = 1;
-            } else if (names.includes("risk:high")) {
+            } else if (!applied.readError && applied.names.includes("risk:high")) {
               console.log("risk label: risk:high");
             }
             if (process.env.GITHUB_STEP_SUMMARY) {

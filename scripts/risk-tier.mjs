@@ -245,14 +245,25 @@ export function failClosedReason(missing) {
   return `base has no ${missing.join(" and ")}`;
 }
 
-export function riskLabelProblem(labels, computedTier) {
-  const risk = (labels ?? []).filter((name) => RISK_LABELS.has(name));
+export function riskLabelProblem(labels, computedTier, options = {}) {
+  const writeSucceeded = Boolean(options && options.writeSucceeded);
+  const readError = options && options.readError ? options.readError : null;
+  if (writeSucceeded && readError) return "Could not re-read labels after a successful label write.";
+  const names = Array.isArray(labels) ? labels : [];
+  const unknown = names.find(
+    (name) => typeof name === "string" && name.startsWith("risk:") && !RISK_LABELS.has(name),
+  );
+  if (unknown) return `Risk label ${unknown} is not a known risk tier.`;
+  const risk = names.filter((name) => RISK_LABELS.has(name));
   if (risk.length > 1) return "Label update left more than one risk:* label.";
-  if (risk.length === 0) return null;
-  const tier = risk[0].slice("risk:".length);
-  if (RANK[tier] == null || RANK[computedTier] == null || RANK[tier] < RANK[computedTier]) {
-    return `Risk label ${risk[0]} is lower than computed tier ${computedTier}.`;
+  if (risk.length === 1) {
+    const tier = risk[0].slice("risk:".length);
+    if (RANK[tier] == null || RANK[computedTier] == null || RANK[tier] < RANK[computedTier]) {
+      return `Risk label ${risk[0]} is lower than computed tier ${computedTier}.`;
+    }
+    return null;
   }
+  if (writeSucceeded) return "A label write succeeded but the pull request has no risk:* label.";
   return null;
 }
 
@@ -275,20 +286,25 @@ function isRiskLabel(name) {
 export async function settleLabelPlan(currentLabels, plan, write) {
   let labels = currentLabels.slice();
   let error = null;
+  let writeSucceeded = false;
   const add = (name) => {
     if (!labels.includes(name)) labels.push(name);
   };
   const remove = (name) => {
     labels = labels.filter((item) => item !== name);
   };
+  const record = async (action) => {
+    const wrote = await write(action);
+    if (wrote !== false) writeSucceeded = true;
+  };
   try {
     if (plan.add.length > 0) {
-      await write({ op: "add", name: plan.label });
+      await record({ op: "add", name: plan.label });
       add(plan.label);
     }
     for (const name of plan.remove) {
       if (!labels.includes(name)) continue;
-      await write({ op: "remove", name });
+      await record({ op: "remove", name });
       remove(name);
     }
   } catch (caught) {
@@ -298,7 +314,7 @@ export async function settleLabelPlan(currentLabels, plan, write) {
     const stale = labels.filter((name) => isRiskLabel(name) && name !== plan.label);
     for (const name of stale) {
       try {
-        await write({ op: "remove", name });
+        await record({ op: "remove", name });
         remove(name);
       } catch (cleanupError) {
         if (cleanupError && cleanupError.status === 404) remove(name);
@@ -306,7 +322,7 @@ export async function settleLabelPlan(currentLabels, plan, write) {
     }
   }
   const risk = labels.filter(isRiskLabel);
-  return { labels, error, conflict: risk.length > 1, risk };
+  return { labels, error, conflict: risk.length > 1, risk, writeSucceeded };
 }
 
 export function applyLabelPlan(currentLabels, plan) {
@@ -357,14 +373,16 @@ async function ensureLabel(token, owner, repo, spec) {
   const encoded = encodeURIComponent(spec.name);
   try {
     await github(token, "GET", `/repos/${owner}/${repo}/labels/${encoded}`);
-    return;
+    return false;
   } catch (error) {
     if (error.status !== 404) throw error;
   }
   try {
     await github(token, "POST", `/repos/${owner}/${repo}/labels`, spec);
+    return true;
   } catch (error) {
     if (error.status !== 422) throw error;
+    return false;
   }
 }
 
@@ -425,6 +443,7 @@ async function syncLabel(token, owner, repo, number, tier) {
         await github(token, "DELETE", `/repos/${owner}/${repo}/issues/${number}/labels/${encoded}`);
       } catch (error) {
         if (error.status !== 404) throw error;
+        return false;
       }
       return;
     }
@@ -436,29 +455,36 @@ async function syncLabel(token, owner, repo, number, tier) {
     }
     throw new Error(`Unknown label op: ${action.op}`);
   };
+  let writeSucceeded = false;
   let settled = {
     labels: current.slice(),
     error: settledError,
     conflict: current.filter(isRiskLabel).length > 1,
     risk: current.filter(isRiskLabel),
+    writeSucceeded: false,
   };
   if (!settledError) {
     try {
       for (const spec of LABEL_SPECS) {
-        await ensureLabel(token, owner, repo, spec);
+        if (await ensureLabel(token, owner, repo, spec)) writeSucceeded = true;
       }
       settled = await settleLabelPlan(current, plan, write);
+      if (settled.writeSucceeded) writeSucceeded = true;
     } catch (error) {
       settled = { ...settled, error };
     }
   }
+  settled.writeSucceeded = writeSucceeded;
   let observed = settled.labels;
+  let readError = null;
   try {
     observed = await listIssueLabels(token, owner, repo, number);
   } catch (error) {
+    readError = error;
     if (!settled.error) settled.error = error;
   }
-  const labelProblem = riskLabelProblem(observed, tier);
+  const labelProblem = riskLabelProblem(observed, tier, { writeSucceeded, readError });
+  if (writeSucceeded && readError && readError.status !== 403 && labelProblem) console.error(labelProblem);
   if (settled.error) {
     settled.error.labelProblem = labelProblem;
     throw settled.error;
