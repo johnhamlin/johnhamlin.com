@@ -8,6 +8,7 @@ import {
   claimFailure,
   computeTier,
   defaultTiersPath,
+  failClosedReason,
   finishGate,
   globToRegExp,
   loadTiers,
@@ -110,9 +111,19 @@ test("agent instruction files match at any depth", () => {
   assert.equal(computeTier(["docs/AGENTS.md"], rules), "high");
   assert.equal(computeTier(["packages/web/CLAUDE.md"], rules), "high");
   assert.equal(computeTier(["notes/REVIEW.md"], rules), "high");
-  const lowered = loadTiers("low **/AGENTS.md\nlow **/CLAUDE.md\nlow **/REVIEW.md\n");
+  assert.equal(computeTier(["src/content/posts/AGENTS.md"], rules), "high");
+  assert.equal(computeTier(["src/content/posts/nested/CLAUDE.md"], rules), "high");
+  assert.equal(computeTier(["src/content/posts/nested/REVIEW.md"], rules), "high");
+  const lowered = loadTiers("low **/AGENTS.md\nlow **/CLAUDE.md\nlow **/REVIEW.md\nlow src/content/posts/**\n");
   assert.equal(computeTier(["notes/REVIEW.md"], lowered), "high");
   assert.equal(computeTier(["docs/AGENTS.md"], lowered), "high");
+  assert.equal(computeTier(["src/content/posts/nested/AGENTS.md"], lowered), "high");
+  const tiersText = fs.readFileSync(defaultTiersPath(), "utf8");
+  const owners = fs.readFileSync(path.join(repoRoot(), ".github/CODEOWNERS"), "utf8");
+  for (const glob of ["**/AGENTS.md", "**/CLAUDE.md", "**/REVIEW.md"]) {
+    assert.match(tiersText, new RegExp(`^high \\*\\*/${glob.slice(3)}$`, "m"));
+    assert.match(owners, new RegExp(`^\\*\\*/${glob.slice(3)} @johnhamlin$`, "m"));
+  }
 });
 
 test("changedPaths includes renames and deletes", () => {
@@ -199,32 +210,85 @@ function extractJob(workflow, name) {
   return next === -1 ? rest : rest.slice(0, next + 1);
 }
 
+test("a missing base script or risk-tiers fails closed to high", () => {
+  assert.equal(failClosedReason(["scripts/risk-tier.mjs"]), "base has no scripts/risk-tier.mjs");
+  assert.equal(failClosedReason(["risk-tiers"]), "base has no risk-tiers");
+  assert.equal(
+    failClosedReason(["scripts/risk-tier.mjs", "risk-tiers"]),
+    "base has no scripts/risk-tier.mjs and risk-tiers",
+  );
+  assert.equal(failClosedReason([]), null);
+
+  const workflow = fs.readFileSync(path.join(repoRoot(), ".github/workflows/risk-tier.yml"), "utf8");
+  const tier = extractJob(workflow, "tier");
+  assert.match(tier, /\[ -f scripts\/risk-tier\.mjs \] && \[ -f risk-tiers \]/);
+  assert.match(tier, /existsSync\("scripts\/risk-tier\.mjs"\)/);
+  assert.match(tier, /existsSync\("risk-tiers"\)/);
+  assert.match(tier, /base has no " \+ missing\.join\(" and "\)/);
+  assert.match(tier, /base has no scripts\/risk-tier\.mjs or risk-tiers/);
+  assert.match(tier, /computed high/);
+});
+
 test("the workflow runs the base script and fails closed when it is missing", () => {
   const workflow = fs.readFileSync(path.join(repoRoot(), ".github/workflows/risk-tier.yml"), "utf8");
   const tier = extractJob(workflow, "tier");
   const testJob = extractJob(workflow, "test");
+  const script = fs.readFileSync(path.join(repoRoot(), "scripts/risk-tier.mjs"), "utf8");
   assert.match(workflow, /on:\n {2}pull_request:\n/);
   assert.doesNotMatch(workflow, /on:\n {2}pull_request_target:/);
   assert.match(tier, /github\.event\.pull_request\.base\.sha/);
   assert.match(tier, /node scripts\/risk-tier\.mjs/);
   assert.match(tier, /persist-credentials:\s*false/);
   assert.match(tier, /computed high/);
-  assert.match(tier, /base has no scripts\/risk-tier\.mjs/);
+  assert.match(script, /\/pulls\/\$\{number\}\/files\?per_page=100&page=\$\{page\}/);
+  assert.match(script, /previous_filename/);
+  assert.doesNotMatch(script, /git diff/);
+  assert.doesNotMatch(script, /child_process/);
   assert.match(testJob, /permissions:\s*\{\s*\}/);
   assert.match(testJob, /npm test/);
   assert.doesNotMatch(testJob, /pull_request\.base\.sha/);
   assert.doesNotMatch(testJob, /secrets\.GITHUB_TOKEN/);
 
+  assert.equal((tier.match(/uses:\s*actions\/checkout@/g) ?? []).length, 1);
+  assert.doesNotMatch(tier, /setup-node/);
+  assert.doesNotMatch(tier, /node-version/);
+  assert.doesNotMatch(tier, /\bnpm\b/);
+  assert.doesNotMatch(tier, /\byarn\b/);
+  assert.doesNotMatch(tier, /pull_request\.head/);
+  assert.doesNotMatch(tier, /\bgithub\.sha\b/);
+
   const steps = tier.split(/\n {6}- /).slice(1);
   const baseAt = steps.findIndex((step) => step.includes("pull_request.base.sha"));
-  assert.ok(baseAt >= 0, "tier job checks out the base");
+  assert.equal(baseAt, 0, "the base checkout is the first step");
   const after = steps.slice(baseAt + 1);
   assert.ok(after.length > 0);
   for (const step of after) {
     assert.doesNotMatch(step, /\bnpm\b/, step.slice(0, 80));
+    assert.doesNotMatch(step, /\byarn\b/, step.slice(0, 80));
     assert.doesNotMatch(step, /risk-tier\.test\.mjs/);
     assert.doesNotMatch(step, /node-version-file:/);
+    assert.doesNotMatch(step, /setup-node/);
   }
+});
+
+test("a malicious yarnrc in the pull request cannot run in the label job", () => {
+  const yarnrc = 'yarn-path "./.yarn/releases/evil.js"\n';
+  const evil = "import { writeFileSync } from 'node:fs';\nwriteFileSync('/tmp/yarn-path-executed', 'ran');\n";
+  assert.match(yarnrc, /^yarn-path "\.\/\.yarn\/releases\/evil\.js"$/m);
+  assert.match(evil, /writeFileSync\('\/tmp\/yarn-path-executed'/);
+
+  const workflow = fs.readFileSync(path.join(repoRoot(), ".github/workflows/risk-tier.yml"), "utf8");
+  const tier = extractJob(workflow, "tier");
+  assert.doesNotMatch(tier, /setup-node/);
+  assert.doesNotMatch(tier, /node-version-file:/);
+  assert.doesNotMatch(tier, /\bnpm\b/);
+  assert.doesNotMatch(tier, /\byarn\b/);
+  assert.doesNotMatch(tier, /pull_request\.head/);
+  assert.doesNotMatch(tier, /\bgithub\.sha\b/);
+  assert.doesNotMatch(tier, /refs\/pull\//);
+  assert.match(tier, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+  assert.match(tier, /persist-credentials:\s*false/);
+  assert.equal((tier.match(/uses:\s*actions\/checkout@/g) ?? []).length, 1);
 });
 
 test("CODEOWNERS lists johnhamlin on every high glob", () => {

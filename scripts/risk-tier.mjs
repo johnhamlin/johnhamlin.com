@@ -184,6 +184,11 @@ export function planLabelUpdates(currentLabels, tier) {
   return { label, add, remove };
 }
 
+export function failClosedReason(missing) {
+  if (!Array.isArray(missing) || missing.length === 0) return null;
+  return `base has no ${missing.join(" and ")}`;
+}
+
 export function finishGate({ labelError, failure }) {
   const denied = Boolean(labelError && labelError.status === 403);
   if (labelError && !denied) {

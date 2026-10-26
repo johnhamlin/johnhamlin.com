@@ -1,8 +1,11 @@
 name: Risk tier
 
 # pull_request, not pull_request_target.
-# The tier job checks out only the base commit and then runs only that tree.
-# Tests are a separate job: no base checkout, and no token.
+# The label job checks out only the base commit. Pull request files are never
+# on disk there, including no head checkout and no merge commit. Changed paths
+# come from the GitHub API. Node is the runner's preinstalled binary: that job
+# does not run setup-node, npm, or yarn. Tests are a separate job with no
+# token and no base checkout.
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
@@ -48,34 +51,29 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "22.23.2"
-
       - name: Checkout base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      - name: Note whether the base has the check script
-        id: base-script
+      - name: Note whether the base has the check
+        id: base-check
         run: |
-          if [ -f scripts/risk-tier.mjs ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
+          if [ -f scripts/risk-tier.mjs ] && [ -f risk-tiers ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
           else
-            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set risk label from the base script
-        if: steps.base-script.outputs.present == 'true'
+        if: steps.base-check.outputs.ready == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/risk-tier.mjs
 
-      - name: Fail closed when the base has no check script
-        if: steps.base-script.outputs.present != 'true'
+      - name: Fail closed when the base lacks the check
+        if: steps.base-check.outputs.ready != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BOOTSTRAP_SOURCE: |
@@ -94,7 +92,13 @@ jobs:
               const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)\b/);
               if (match && (match[1] === "x" || match[1] === "X")) checked.push(match[2]);
             }
-            console.log("bootstrap: base has no scripts/risk-tier.mjs");
+            const missing = [];
+            if (!fs.existsSync("scripts/risk-tier.mjs")) missing.push("scripts/risk-tier.mjs");
+            if (!fs.existsSync("risk-tiers")) missing.push("risk-tiers");
+            const reason = missing.length
+              ? "base has no " + missing.join(" and ")
+              : "base has no scripts/risk-tier.mjs or risk-tiers";
+            console.log("bootstrap: " + reason);
             console.log("computed high");
             console.log("claimed " + (checked.length === 1 ? checked[0] : "none"));
             let failure = null;
@@ -165,7 +169,7 @@ jobs:
               console.warn("warning: label write was denied (403). Continuing with the body check. " + error.message);
             }
             if (process.env.GITHUB_STEP_SUMMARY) {
-              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "Risk label: `risk:high`\n\nBase commit has no scripts/risk-tier.mjs. The tier fails closed to high.\n");
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "Risk label: `risk:high`\n\n" + reason + ". The tier fails closed to high.\n");
             }
             if (failure) {
               console.error(failure);
