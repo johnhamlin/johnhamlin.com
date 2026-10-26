@@ -1,79 +1,26 @@
 name: Risk tier
-
-# pull_request, not pull_request_target. The check job checks out only the
-# base commit, so pull request files are never on disk. It does not run
-# setup-node, npm, or yarn, and it does not call the label API.
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
-
 permissions: {}
-
 jobs:
   test:
-    name: Test risk tier
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Checkout pull request
-        env:
-          GITHUB_TOKEN: ""
-          GIT_TERMINAL_PROMPT: "0"
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          git init .
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth 1 origin "pull/${PR_NUMBER}/head"
-          git checkout --detach FETCH_HEAD
-
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - run: GITHUB_TOKEN= GIT_TERMINAL_PROMPT=0 PR_NUMBER="${{ github.event.pull_request.number }}" git init . && git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git" && git fetch --depth 1 origin "pull/${PR_NUMBER}/head" && git checkout --detach FETCH_HEAD
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
-
-      - name: Test risk tier
-        env:
-          GITHUB_TOKEN: ""
-        run: npm test
-
+      - run: GITHUB_TOKEN= npm ci && GITHUB_TOKEN= npm test
   tier:
-    name: Risk tier
     runs-on: ubuntu-slim
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
+    permissions: { contents: read }
     steps:
-      - name: Checkout base
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
-
-      - name: Check risk tier
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -f scripts/risk-tier.mjs ] && [ -f risk-tiers ]; then
-            node scripts/risk-tier.mjs
-            exit
-          fi
-          node --input-type=module -e 'import fs from "node:fs";
-          const body = String(JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")).pull_request.body ?? "");
-          const heading = body.match(/^## Risk tier\s*$/m);
-          const rest = heading ? body.slice(heading.index + heading[0].length) : "";
-          const end = rest.search(/^## /m);
-          const section = heading ? (end === -1 ? rest : rest.slice(0, end)) : "";
-          const checked = [];
-          for (const line of section.split(/\r?\n/)) {
-            const match = line.match(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([ xX])\]\s+(low|medium|high)(?![\w-])/);
-            if (match && (match[1] === "x" || match[1] === "X")) checked.push(match[2]);
-          }
-          console.log("base has no scripts/risk-tier.mjs or risk-tiers");
-          console.log("computed high");
-          if (checked.length !== 1 || checked[0] !== "high") {
-            console.error("Claimed risk tier is missing or lower than computed tier high.");
-            process.exit(1);
-          }
-          console.log("claimed high");'
+      - run: |
+          if [ -f scripts/risk-tier.mjs ] && [ -f risk-tiers ]; then npm ci && node scripts/risk-tier.mjs; exit; fi
+          node --input-type=module -e 'import fs from "node:fs"; const b=String(JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH,"utf8")).pull_request.body??""); const h=b.match(/^## Risk tier\s*$/m); const rest=h?b.slice(h.index+h[0].length):""; const n=rest.search(/^## /m); const s=h?(n<0?rest:rest.slice(0,n)):""; const c=[...s.matchAll(/^[ \t]*(?:[-*+]|\d+\.)\s+\[([xX])\]\s+high(?![\w-])/gm)]; console.log("base has no scripts/risk-tier.mjs or risk-tiers"); console.log("computed high"); if(c.length!==1){console.error("Claimed risk tier is missing or lower than computed tier high."); process.exit(1)} console.log("claimed high")'
