@@ -7,7 +7,7 @@ This is the public repo for johnhamlin.com, the blog-first rebuild of John Hamli
 - Never commit secrets, tokens, or `.env` files.
 - No drafts or unpublished posts in this repo.
 - Only a redacted résumé.
-- Commits use the GitHub noreply email: `295746+johnhamlin@users.noreply.github.com`.
+- Commits use the `johnhamlin-agents[bot]` identity: `348833710+johnhamlin-agents[bot]@users.noreply.github.com`.
 - Never use `--no-verify`.
 - Never merge. John approves merges.
 - Never push to main.

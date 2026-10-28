@@ -1,0 +1,30 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { displayDate, getPublishedPosts, isoDate } from "../../lib/posts";
+
+const posts = await getPublishedPosts();
+---
+
+<BaseLayout title="Blog | John Hamlin" description="Posts by John Hamlin.">
+  <h1 class="text-3xl font-semibold tracking-tight">Blog</h1>
+  <ul class="mt-8 space-y-8">
+    {
+      posts.map((post) => (
+        <li>
+          <h2 class="text-xl font-semibold">
+            <a href={`/blog/${post.id}/`} class="underline">
+              {post.data.title}
+            </a>
+          </h2>
+          <time
+            datetime={isoDate(post.data.date)}
+            class="mt-1 block text-sm text-neutral-600"
+          >
+            {displayDate(post.data.date)}
+          </time>
+          <p class="mt-2 leading-7">{post.data.description}</p>
+        </li>
+      ))
+    }
+  </ul>
+</BaseLayout>
