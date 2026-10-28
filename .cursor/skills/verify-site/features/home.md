@@ -1,6 +1,6 @@
 # Home
 
-The home page is the only page. A visitor who opens the site root sees John Hamlin's name, a one-sentence placeholder, and a document in English with a title, description, and viewport. The page loads a stylesheet and an icon, and it does not load a script.
+A visitor who opens the site root sees John Hamlin's name, a one-sentence placeholder, and a document in English with a title, description, and viewport. The page loads a stylesheet and an icon, and it does not load a script.
 
 ## Sub-features
 

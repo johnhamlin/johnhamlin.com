@@ -23,7 +23,7 @@ Preconditions:
 - `.cursor/skills/verify-site/scripts/doctor.sh` reports that listener in this run's process group.
 - `$VERIFY_ROOT/evidence` exists.
 
-- **Open the index and a post.** Run `.cursor/skills/verify-site/scripts/drive-blog.sh`. Exit code `0`. `$VERIFY_ROOT/evidence/blog.html` contains `<title>Blog | John Hamlin</title>` and `<a href="/blog/hello-world/"`. `$VERIFY_ROOT/evidence/blog-post.html` contains `<title>Hello, world | John Hamlin</title>`, `<article`, `<time datetime="2026-10-27"`, and the description meta. Neither body contains `<script`.
+- **Open the index and a post.** Run `.cursor/skills/verify-site/scripts/drive-blog.sh`. Exit code `0`. `$VERIFY_ROOT/evidence/blog.html` contains `<title>Blog | John Hamlin</title>`, `<a href="/blog/hello-world/"`, `<time datetime="2026-10-27"`, and the post description. `$VERIFY_ROOT/evidence/blog-post.html` contains `<title>Hello, world | John Hamlin</title>`, `<article`, `<time datetime="2026-10-27"`, the description meta, and a `Tags` list with `meta`. Neither body contains `<script`.
 - **Leave drafts out.** Before launch, add `src/content/posts/zz-draft-probe.md` with `draft: true` and the title `DRAFTPROBE`. After launch, `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$VERIFY_PORT/blog/zz-draft-probe/` prints `404`, and `grep -rl DRAFTPROBE dist` prints nothing. Delete the probe file and never commit it.
 
 ## Gotchas
