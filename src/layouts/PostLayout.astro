@@ -1,0 +1,37 @@
+---
+import BaseLayout from "./BaseLayout.astro";
+import { displayDate, isoDate } from "../lib/posts";
+
+interface Props {
+  title: string;
+  date: Date;
+  description: string;
+  tags: string[];
+}
+
+const { title, date, description, tags } = Astro.props;
+---
+
+<BaseLayout title={`${title} | John Hamlin`} description={description}>
+  <article>
+    <header>
+      <p><a href="/blog/" class="text-sm underline">All posts</a></p>
+      <h1 class="mt-6 text-3xl font-semibold tracking-tight">{title}</h1>
+      <time datetime={isoDate(date)} class="mt-2 block text-sm text-neutral-600">
+        {displayDate(date)}
+      </time>
+      {
+        tags.length > 0 && (
+          <ul class="mt-3 flex flex-wrap gap-2 text-sm" aria-label="Tags">
+            {tags.map((tag) => (
+              <li class="rounded bg-neutral-100 px-2 py-0.5">{tag}</li>
+            ))}
+          </ul>
+        )
+      }
+    </header>
+    <div class="mt-8 text-lg leading-7 [&_a]:underline [&>*+*]:mt-4">
+      <slot />
+    </div>
+  </article>
+</BaseLayout>
