@@ -8,9 +8,6 @@ on:
 
 permissions:
   contents: read
-  # Commenting the Lighthouse URL on the pull request needs both of these.
-  issues: write
-  pull-requests: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -21,6 +18,9 @@ jobs:
     name: CI
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      report_url: ${{ steps.lhci.outputs.report_url }}
+      scores: ${{ steps.lhci.outputs.scores }}
     env:
       ASTRO_TELEMETRY_DISABLED: "1"
     steps:
@@ -28,6 +28,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -108,12 +109,35 @@ jobs:
           echo "$scores"
           echo "Report: $url"
 
+      - name: Lighthouse step summary
+        if: always() && steps.lhci.outputs.report_url != ''
+        run: |
+          {
+            echo "### Lighthouse"
+            echo "${{ steps.lhci.outputs.report_url }}"
+            echo ""
+            echo '```'
+            echo "${{ steps.lhci.outputs.scores }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  lighthouse-comment:
+    name: Link Lighthouse report
+    needs: ci
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Commenting the Lighthouse URL on the pull request needs both of these.
+    # This job runs no pull request code.
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
       - name: Link Lighthouse report
-        if: github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          REPORT_URL: ${{ steps.lhci.outputs.report_url }}
-          LH_SCORES: ${{ steps.lhci.outputs.scores }}
+          REPORT_URL: ${{ needs.ci.outputs.report_url }}
+          LH_SCORES: ${{ needs.ci.outputs.scores }}
         with:
           script: |
             const marker = "<!-- lighthouse-ci-report -->";
@@ -153,15 +177,3 @@ jobs:
                 body,
               });
             }
-
-      - name: Lighthouse step summary
-        if: always() && steps.lhci.outputs.report_url != ''
-        run: |
-          {
-            echo "### Lighthouse"
-            echo "${{ steps.lhci.outputs.report_url }}"
-            echo ""
-            echo '```'
-            echo "${{ steps.lhci.outputs.scores }}"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
