@@ -35,5 +35,5 @@ johnhamlin.com is being rebuilt in public as a blog-first personal site. The por
 
 - `npm run build` writes a static `dist/` directory. This repo has no server runtime.
 - Client JavaScript stays out unless a later ticket adds it on purpose.
-- CI installs the `.nvmrc` Node version and runs check, build, lint, a gitleaks scan of the git history, and Lighthouse against `dist/`.
+- CI installs the `.nvmrc` Node version and runs check, build, lint, tests, a gitleaks scan of the git history, and Lighthouse against `dist/`.
 - A later ticket can add Pages or Workers static assets without changing the build output. Deploy config is still absent.
