@@ -47,13 +47,14 @@ A listener in any other process group is not this run. Do not drive it.
 
 ## Drive
 
-Drive the only mapped feature, the placeholder home page. Follow `.cursor/skills/verify-site/features/home.md`. One command runs that journey:
+Drive the mapped features, the home page and the blog. Follow `.cursor/skills/verify-site/features/home.md` and `.cursor/skills/verify-site/features/blog.md`. One command runs each journey:
 
 ```bash
 .cursor/skills/verify-site/scripts/drive-home.sh
+.cursor/skills/verify-site/scripts/drive-blog.sh
 ```
 
-The script saves the response and fails if any assertion in the feature file fails. The page has no form and no second route. Do not invent a path that the map does not list.
+Each script saves the responses and fails if any assertion in its feature file fails. No page has a form. Do not invent a path that the map does not list.
 
 `npm run dev` is a different server. It is not this harness.
 
@@ -64,12 +65,13 @@ Proof artifacts go in `$VERIFY_ROOT/evidence/` and stay there after cleanup.
 - `preview.log` is the preview process output, including the ready URL.
 - `doctor.txt` and `doctor.html` are the doctor check.
 - `home.headers`, `home.html`, `home.css`, `favicon.headers`, and `favicon.svg` are the home journey.
+- `blog.headers`, `blog.html`, `blog-post.headers`, and `blog-post.html` are the blog journey.
 
 Standards for this site:
 
 - Drive the preview of the production build. Do not assert against source files or against `dist/` on disk as a substitute for the HTTP response.
 - Save the request's response, not only a final summary. Headers and body are both evidence.
-- The home page writes nothing and calls no external service. There is no side effect to confirm beyond the responses themselves.
+- No page writes anything or calls an external service. There is no side effect to confirm beyond the responses themselves.
 - The stylesheet and favicon responses are part of the page load. Fetch the URLs the HTML points at.
 - A run that served a different port, or a port this run does not own, is not proof.
 
