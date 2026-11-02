@@ -65,7 +65,7 @@ Proof artifacts go in `$VERIFY_ROOT/evidence/` and stay there after cleanup.
 - `preview.log` is the preview process output, including the ready URL.
 - `doctor.txt` and `doctor.html` are the doctor check.
 - `home.headers`, `home.html`, `home.css`, `favicon.headers`, and `favicon.svg` are the home journey.
-- `blog.headers`, `blog.html`, `blog-post.headers`, and `blog-post.html` are the blog journey.
+- `blog.headers` and `blog.html` are the blog journey.
 
 Standards for this site:
 

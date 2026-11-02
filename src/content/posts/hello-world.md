@@ -3,6 +3,7 @@ title: "Hello, world"
 date: 2026-10-27
 description: "The site is being rebuilt in public, with the blog first."
 tags: ["meta"]
+draft: true
 ---
 
 Hello, world. This is the first post on the rebuilt johnhamlin.com.
