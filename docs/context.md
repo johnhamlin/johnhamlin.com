@@ -4,4 +4,4 @@ johnhamlin.com is the blog-first rebuild of John Hamlin's personal site. The por
 
 The rebuild is built in public. The factory is Grok Bot agents, pstack, Cursor cloud agents, Claude Code, and Codex review. Rules for that work live in `AGENTS.md`. Decisions that should stick are recorded under `docs/adr/`.
 
-This repository currently holds the harness: the toolchain, the checks, and one placeholder page. Real pages, visual design, writing, and deploy configuration come later. Drafts and unpublished posts do not belong here.
+This repository currently holds the harness: the toolchain, the checks, a placeholder home page, and the blog. Real pages, visual design, writing, and deploy configuration come later. Drafts and unpublished posts do not belong here.

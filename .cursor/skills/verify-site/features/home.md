@@ -1,6 +1,6 @@
 # Home
 
-The home page is the only page. A visitor who opens the site root sees John Hamlin's name, a one-sentence placeholder, and a document in English with a title, description, and viewport. The page loads a stylesheet and an icon, and it does not load a script.
+A visitor who opens the site root sees John Hamlin's name, a one-sentence placeholder, and a document in English with a title, description, and viewport. The page loads a stylesheet and an icon, and it does not load a script.
 
 ## Sub-features
 
@@ -34,4 +34,4 @@ Preconditions:
 - If port 4173 is taken, Astro prints `Port 4173 is in use, trying another one...` and serves a different port. That is a failed launch. Do not curl the other port and call it this run.
 - Killing the `npm` pid and leaving its child running keeps the port busy. Cleanup kills the process group from `setsid`, not the name `node`.
 - The HTML is one line. Assert the full attribute strings above, not a reformatted document.
-- This map has no other entry point. A 404 on any other path is a missing page, not a skipped check.
+- The blog routes are in `blog.md`. A 404 on a path neither file lists is a missing page, not a skipped check.

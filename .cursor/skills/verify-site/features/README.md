@@ -2,7 +2,7 @@
 
 This directory is the maintained source for verifying the user-facing behavior of johnhamlin.com. Read the index before driving the site, then use the matching feature file as the recipe.
 
-The scaffold has one route. Blog, portfolio, and résumé surfaces are not in the product yet, so they are not mapped. Add a feature file when a visitor can actually reach that surface. Do not mark an unmapped route as verified through the home page.
+The site has the home page and the blog. Portfolio and résumé surfaces are not in the product yet, so they are not mapped. Add a feature file when a visitor can actually reach that surface. Do not mark an unmapped route as verified through the home page.
 
 ## Baseline preconditions
 
@@ -16,7 +16,7 @@ The scaffold has one route. Blog, portfolio, and résumé surfaces are not in th
 
 - Start every recipe from the baseline state unless its preconditions say otherwise.
 - Treat every command as literal. Keep quoted strings and flags unchanged.
-- Drive HTTP with `curl` against the preview origin. The home journey is `.cursor/skills/verify-site/scripts/drive-home.sh`.
+- Drive HTTP with `curl` against the preview origin. The home journey is `.cursor/skills/verify-site/scripts/drive-home.sh`, and the blog journey is `.cursor/skills/verify-site/scripts/drive-blog.sh`.
 - Do not remove proof artifacts during cleanup.
 
 ## Proof and skip reporting
@@ -38,3 +38,4 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 ## Features
 
 - [Home](./home.md) covers the placeholder at `/`: the document, its metadata, the linked stylesheet, the favicon, and the absence of a script.
+- [Blog](./blog.md) covers `/blog/` and `/blog/<id>/`: the published list, the post article, its metadata, and draft filtering.
